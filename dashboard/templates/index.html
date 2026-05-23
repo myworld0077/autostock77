@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoStock — 주식 자동매매 대시보드</title>
+    <meta name="description" content="AutoStock 주식 자동매매 실시간 모니터링 대시보드">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        /* ═══════════════════════════════════════════════
+           Design System
+           ═══════════════════════════════════════════════ */
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-card: #111827;
+            --bg-card-hover: #1a2332;
+            --bg-glass: rgba(17, 24, 39, 0.7);
+            --border: rgba(255, 255, 255, 0.06);
+            --border-accent: rgba(99, 102, 241, 0.3);
+
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+
+            --accent: #6366f1;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --green: #10b981;
+            --green-glow: rgba(16, 185, 129, 0.15);
+            --red: #ef4444;
+            --red-glow: rgba(239, 68, 68, 0.15);
+            --amber: #f59e0b;
+            --cyan: #06b6d4;
+
+            --radius: 16px;
+            --radius-sm: 10px;
+            --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background */
+        body::before {
+            content: '';
+            position: fixed;
+            top: -50%; left: -50%;
+            width: 200%; height: 200%;
+            background: radial-gradient(circle at 30% 20%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 80%, rgba(6, 182, 212, 0.06) 0%, transparent 40%),
+                        radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.04) 0%, transparent 60%);
+            animation: bgShift 20s ease-in-out infinite alternate;
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        @keyframes bgShift {
+            0% { transform: translate(0, 0) rotate(0deg); }
+            100% { transform: translate(-5%, 3%) rotate(3deg); }
+        }
+
+        /* ═══════════════════════════════════════════════
+           Layout
+           ═══════════════════════════════════════════════ */
+        .container {
+            max-width: 1360px;
+            margin: 0 auto;
+            padding: 32px 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 36px;
+        }
+
+        .header__brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .header__logo {
+            width: 44px; height: 44px;
+            background: linear-gradient(135deg, var(--accent), var(--cyan));
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            box-shadow: 0 0 20px var(--accent-glow);
+        }
+
+        .header__title {
+            font-size: 26px;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--text-primary), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header__badge {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .badge--paper {
+            background: var(--green-glow);
+            color: var(--green);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge--real {
+            background: var(--red-glow);
+            color: var(--red);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .header__meta {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .header__time {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+            box-shadow: 0 0 8px var(--green);
+            animation: blink 2s ease-in-out infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* ─── Cards ─────────────────────────────── */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 18px;
+            margin-bottom: 28px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent), var(--cyan));
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .stat-card:hover {
+            border-color: var(--border-accent);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow);
+        }
+
+        .stat-card:hover::before { opacity: 1; }
+
+        .stat-card__icon {
+            width: 42px; height: 42px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            margin-bottom: 14px;
+        }
+
+        .stat-card__icon--cash { background: rgba(99, 102, 241, 0.12); }
+        .stat-card__icon--eval { background: rgba(6, 182, 212, 0.12); }
+        .stat-card__icon--profit { background: rgba(16, 185, 129, 0.12); }
+        .stat-card__icon--rate { background: rgba(245, 158, 11, 0.12); }
+
+        .stat-card__label {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+
+        .stat-card__value {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: -0.5px;
+        }
+
+        .stat-card__value--positive { color: var(--red); }
+        .stat-card__value--negative { color: var(--green); }
+
+        /* ─── Table section ─────────────────────── */
+        .section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 24px;
+            overflow: hidden;
+        }
+
+        .section__header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .section__title {
+            font-size: 16px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section__count {
+            background: rgba(99, 102, 241, 0.15);
+            color: var(--accent);
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .refresh-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .refresh-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+            background: rgba(99, 102, 241, 0.08);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead th {
+            padding: 14px 20px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        tbody td {
+            padding: 16px 20px;
+            font-size: 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            transition: background 0.15s;
+        }
+
+        tbody tr:hover td {
+            background: var(--bg-card-hover);
+        }
+
+        tbody tr:last-child td { border-bottom: none; }
+
+        .stock-name {
+            font-weight: 600;
+        }
+
+        .stock-code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-left: 6px;
+        }
+
+        .num {
+            font-family: 'JetBrains Mono', monospace;
+            text-align: right;
+        }
+
+        .positive { color: var(--red); }
+        .negative { color: var(--green); }
+
+        .profit-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .profit-badge.positive {
+            background: var(--red-glow);
+        }
+
+        .profit-badge.negative {
+            background: var(--green-glow);
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-muted);
+        }
+
+        .empty-state__icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .empty-state__text {
+            font-size: 14px;
+        }
+
+        /* ─── Watch list ─────────────────────────── */
+        .watch-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 14px;
+            padding: 20px;
+        }
+
+        .watch-card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 18px;
+            transition: all 0.25s;
+            cursor: default;
+        }
+
+        .watch-card:hover {
+            border-color: var(--border-accent);
+            transform: translateY(-1px);
+        }
+
+        .watch-card__name {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+
+        .watch-card__code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .watch-card__price {
+            font-size: 22px;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 4px;
+        }
+
+        .watch-card__change {
+            font-size: 13px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Loading spinner */
+        .spinner {
+            display: inline-block;
+            width: 18px; height: 18px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* ─── Responsive ─────────────────────────── */
+        @media (max-width: 900px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        @media (max-width: 600px) {
+            .stats-grid { grid-template-columns: 1fr; }
+            .header { flex-direction: column; gap: 12px; align-items: flex-start; }
+            .stat-card__value { font-size: 22px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header" id="header">
+            <div class="header__brand">
+                <div class="header__logo">📈</div>
+                <h1 class="header__title">AutoStock</h1>
+                <span class="header__badge {{ 'badge--paper' if trade_mode == '모의투자' else 'badge--real' }}">
+                    {{ trade_mode }}
+                </span>
+            </div>
+            <div class="header__meta">
+                <div class="status-dot"></div>
+                <span class="header__time" id="clock">--:--:--</span>
+            </div>
+        </header>
+
+        <!-- Stats -->
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card">
+                <div class="stat-card__icon stat-card__icon--cash">💵</div>
+                <div class="stat-card__label">주문가능 현금</div>
+                <div class="stat-card__value" id="stat-cash">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card__icon stat-card__icon--eval">📊</div>
+                <div class="stat-card__label">총 평가금액</div>
+                <div class="stat-card__value" id="stat-eval">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card__icon stat-card__icon--profit">💰</div>
+                <div class="stat-card__label">총 평가손익</div>
+                <div class="stat-card__value" id="stat-profit">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card__icon stat-card__icon--rate">📈</div>
+                <div class="stat-card__label">총 수익률</div>
+                <div class="stat-card__value" id="stat-rate">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Holdings Table -->
+        <div class="section" id="holdings-section">
+            <div class="section__header">
+                <div class="section__title">
+                    📋 보유 종목
+                    <span class="section__count" id="holdings-count">0</span>
+                </div>
+                <button class="refresh-btn" onclick="fetchData()">🔄 새로고침</button>
+            </div>
+            <div id="holdings-body">
+                <div class="empty-state">
+                    <div class="empty-state__icon">📭</div>
+                    <div class="empty-state__text">데이터를 불러오는 중...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Watch List -->
+        <div class="section" id="watch-section">
+            <div class="section__header">
+                <div class="section__title">
+                    👀 감시 종목
+                </div>
+            </div>
+            <div class="watch-grid" id="watch-grid">
+                <div class="empty-state" style="grid-column: 1/-1;">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ─── Utilities ────────────────────────────
+        function fmt(n) {
+            if (n === null || n === undefined) return '-';
+            return Number(n).toLocaleString('ko-KR');
+        }
+
+        function profitClass(val) {
+            return val > 0 ? 'positive' : val < 0 ? 'negative' : '';
+        }
+
+        // ─── Clock ───────────────────────────────
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent =
+                now.toLocaleTimeString('ko-KR', { hour12: false });
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // ─── Fetch Balance ──────────────────────
+        async function fetchBalance() {
+            try {
+                const res = await fetch('/api/balance');
+                const d = await res.json();
+                if (d.error) throw new Error(d.error);
+
+                document.getElementById('stat-cash').textContent = fmt(d.cash) + '원';
+                document.getElementById('stat-eval').textContent = fmt(d.total_eval) + '원';
+
+                const profitEl = document.getElementById('stat-profit');
+                profitEl.textContent = (d.total_profit >= 0 ? '+' : '') + fmt(d.total_profit) + '원';
+                profitEl.className = 'stat-card__value ' +
+                    (d.total_profit > 0 ? 'stat-card__value--positive' : 'stat-card__value--negative');
+
+                const rateEl = document.getElementById('stat-rate');
+                rateEl.textContent = (d.profit_rate >= 0 ? '+' : '') + d.profit_rate.toFixed(2) + '%';
+                rateEl.className = 'stat-card__value ' +
+                    (d.profit_rate > 0 ? 'stat-card__value--positive' : 'stat-card__value--negative');
+            } catch (e) {
+                document.getElementById('stat-cash').textContent = '-';
+                console.error('Balance error:', e);
+            }
+        }
+
+        // ─── Fetch Holdings ─────────────────────
+        async function fetchHoldings() {
+            try {
+                const res = await fetch('/api/holdings');
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                document.getElementById('holdings-count').textContent = data.length;
+
+                if (data.length === 0) {
+                    document.getElementById('holdings-body').innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state__icon">📭</div>
+                            <div class="empty-state__text">보유 종목이 없습니다</div>
+                        </div>`;
+                    return;
+                }
+
+                let html = `<table>
+                    <thead>
+                        <tr>
+                            <th>종목</th>
+                            <th style="text-align:right">보유수량</th>
+                            <th style="text-align:right">평균매입가</th>
+                            <th style="text-align:right">현재가</th>
+                            <th style="text-align:right">평가금액</th>
+                            <th style="text-align:right">평가손익</th>
+                            <th style="text-align:right">수익률</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+
+                data.forEach(h => {
+                    const cls = profitClass(h.profit);
+                    html += `<tr>
+                        <td>
+                            <span class="stock-name">${h.name}</span>
+                            <span class="stock-code">${h.code}</span>
+                        </td>
+                        <td class="num">${fmt(h.qty)}주</td>
+                        <td class="num">${fmt(h.avg_price)}원</td>
+                        <td class="num">${fmt(h.cur_price)}원</td>
+                        <td class="num">${fmt(h.eval_amount)}원</td>
+                        <td class="num ${cls}">${h.profit >= 0 ? '+' : ''}${fmt(h.profit)}원</td>
+                        <td class="num">
+                            <span class="profit-badge ${cls}">
+                                ${h.profit_rate >= 0 ? '+' : ''}${h.profit_rate.toFixed(2)}%
+                            </span>
+                        </td>
+                    </tr>`;
+                });
+
+                html += '</tbody></table>';
+                document.getElementById('holdings-body').innerHTML = html;
+            } catch (e) {
+                document.getElementById('holdings-body').innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state__icon">⚠️</div>
+                        <div class="empty-state__text">데이터 로드 실패: ${e.message}</div>
+                    </div>`;
+            }
+        }
+
+        // ─── Fetch Watch List ──────────────────
+        const WATCH_LIST = ['005930', '000660', '035420', '035720', '051910'];
+
+        async function fetchWatchList() {
+            const grid = document.getElementById('watch-grid');
+            let html = '';
+
+            for (const code of WATCH_LIST) {
+                try {
+                    const res = await fetch(`/api/price/${code}`);
+                    const d = await res.json();
+                    if (d.error) continue;
+
+                    const cls = profitClass(d.change);
+                    const arrow = d.change > 0 ? '▲' : d.change < 0 ? '▼' : '-';
+
+                    html += `<div class="watch-card">
+                        <div class="watch-card__name">${d.name}</div>
+                        <div class="watch-card__code">${d.code}</div>
+                        <div class="watch-card__price ${cls}">${fmt(d.price)}원</div>
+                        <div class="watch-card__change ${cls}">
+                            ${arrow} ${fmt(Math.abs(d.change))}원 (${d.change_rate >= 0 ? '+' : ''}${d.change_rate.toFixed(2)}%)
+                        </div>
+                    </div>`;
+                } catch (e) {
+                    html += `<div class="watch-card">
+                        <div class="watch-card__code">${code}</div>
+                        <div class="watch-card__price">로드 실패</div>
+                    </div>`;
+                }
+            }
+
+            grid.innerHTML = html || '<div class="empty-state" style="grid-column:1/-1"><div class="empty-state__text">감시 종목을 불러올 수 없습니다</div></div>';
+        }
+
+        // ─── Init ───────────────────────────────
+        async function fetchData() {
+            await Promise.all([fetchBalance(), fetchHoldings(), fetchWatchList()]);
+        }
+
+        fetchData();
+
+        // 30초마다 자동 새로고침
+        setInterval(fetchData, 30000);
+    </script>
+</body>
+</html>
