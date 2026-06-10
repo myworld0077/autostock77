@@ -1,9 +1,9 @@
 """
 AutoStock 컨트롤 런처
 ======================
-  1  → 자동매매 시작  (python main.py)
-  2  → 자동매매 중지
-  0  → 런처 종료
+  1  → 가동 (자동매매 시작)
+  2  → 잔고 및 보유종목 조회
+  0  → 중지 및 종료
 """
 import subprocess
 import sys
@@ -57,14 +57,36 @@ def stop_program():
     _proc = None
 
 
+def show_account_info():
+    print("\n⏳ [잔고 및 보유종목 조회 중...]")
+    try:
+        from core.account import get_balance, get_holdings
+        balance = get_balance()
+        print(f"\n===== 💰 계좌 잔고 =====")
+        print(f"주문가능현금 : {balance['cash']:,} 원")
+        print(f"총 평가금액  : {balance['total_eval']:,} 원")
+        print(f"총 평가손익  : {balance['total_profit']:,} 원 ({balance['profit_rate']:.2f}%)")
+        
+        holdings = get_holdings()
+        print(f"\n===== 📊 보유 종목 ({len(holdings)}종목) =====")
+        if not holdings:
+            print("보유 중인 종목이 없습니다.")
+        else:
+            for item in holdings:
+                print(f"- {item['name']} ({item['code']}): {item['qty']}주 | 수익: {item['profit']:,}원 ({item['profit_rate']:.2f}%)")
+        print("============================\n")
+    except Exception as e:
+        print(f"❌ 조회 실패: {e}\n")
+
+
 def print_menu():
     status = "🟢 실행 중" if is_running() else "⚫ 정지"
     print(f"\n{'='*40}")
     print(f"  AutoStock 컨트롤러  [{status}]")
     print(f"{'='*40}")
-    print("  1  →  자동매매 시작")
-    print("  2  →  자동매매 중지")
-    print("  0  →  런처 종료")
+    print("  1  →  가동 (자동매매 시작)")
+    print("  2  →  잔고 및 매매내역(보유) 조회")
+    print("  0  →  중지 및 런처 종료")
     print(f"{'='*40}")
 
 
@@ -85,13 +107,13 @@ def main():
         if cmd == "1":
             start_program()
         elif cmd == "2":
-            stop_program()
+            show_account_info()
         elif cmd == "0":
             stop_program()
             print("런처를 종료합니다.")
             break
         else:
-            print("  ❓ 알 수 없는 명령입니다. (1=시작 / 2=중지 / 0=종료)")
+            print("  ❓ 알 수 없는 명령입니다. (1=가동 / 2=잔고조회 / 0=중지)")
 
 
 if __name__ == "__main__":
