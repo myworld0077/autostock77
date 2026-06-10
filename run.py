@@ -2,8 +2,8 @@
 AutoStock 컨트롤 런처
 ======================
   1  → 자동매매 시작  (python main.py)
-  0  → 자동매매 중지
-  q  → 런처 종료
+  2  → 자동매매 중지
+  0  → 런처 종료
 """
 import subprocess
 import sys
@@ -63,8 +63,8 @@ def print_menu():
     print(f"  AutoStock 컨트롤러  [{status}]")
     print(f"{'='*40}")
     print("  1  →  자동매매 시작")
-    print("  0  →  자동매매 중지")
-    print("  q  →  런처 종료")
+    print("  2  →  자동매매 중지")
+    print("  0  →  런처 종료")
     print(f"{'='*40}")
 
 
@@ -76,7 +76,7 @@ def main():
             print(f"\n⚠️  프로그램이 종료되었습니다 (종료코드: {_proc.returncode})")
 
         try:
-            cmd = input("명령 입력 (1/0/q): ").strip().lower()
+            cmd = input("명령 입력 (1/2/0): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\n런처 종료.")
             stop_program()
@@ -84,14 +84,14 @@ def main():
 
         if cmd == "1":
             start_program()
-        elif cmd == "0":
+        elif cmd == "2":
             stop_program()
-        elif cmd in ("q", "quit", "exit"):
+        elif cmd == "0":
             stop_program()
             print("런처를 종료합니다.")
             break
         else:
-            print("  ❓ 알 수 없는 명령입니다. (1=시작 / 0=중지 / q=종료)")
+            print("  ❓ 알 수 없는 명령입니다. (1=시작 / 2=중지 / 0=종료)")
 
 
 if __name__ == "__main__":
