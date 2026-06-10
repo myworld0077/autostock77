@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from functools import lru_cache
+from typing import Dict, Optional
 
 import holidays as _holidays_lib
 
 from utils.logger import log
 
 # ─── KIS API 결과 캐시 (당일 1회만 호출) ─────────────────────────
-_kis_cache: dict[str, bool | None] = {}  # YYYYMMDD → True(휴장)/False(영업)/None(실패)
+_kis_cache: Dict[str, Optional[bool]] = {}  # YYYYMMDD → True(휴장)/False(영업)/None(실패)
 
 
 # ─── 법정공휴일 ────────────────────────────────────────────────────
@@ -30,7 +31,7 @@ def _kr_holidays(year: int) -> _holidays_lib.HolidayBase:
 
 # ─── KIS API 영업일 조회 ───────────────────────────────────────────
 
-def _kis_is_holiday(target: date) -> bool | None:
+def _kis_is_holiday(target: date) -> Optional[bool]:
     """
     KIS API(CTCA0903R)로 해당 날짜의 휴장 여부 조회.
 
@@ -116,7 +117,7 @@ def verify_market_open_strict() -> bool:
 
 # ─── 공개 API ─────────────────────────────────────────────────────
 
-def is_trading_day(target: date | None = None) -> bool:
+def is_trading_day(target: Optional[date] = None) -> bool:
     """
     주어진 날짜가 거래소 영업일인지 판단.
 
@@ -180,7 +181,7 @@ def is_trading_day(target: date | None = None) -> bool:
     return True
 
 
-def next_trading_day(from_date: date | None = None) -> date:
+def next_trading_day(from_date: Optional[date] = None) -> date:
     """다음 영업일 날짜 반환 (최대 60일 탐색)."""
     d = (from_date or date.today()) + timedelta(days=1)
     for _ in range(60):  # 무한루프 방지
@@ -192,7 +193,7 @@ def next_trading_day(from_date: date | None = None) -> date:
     return (from_date or date.today()) + timedelta(days=1)
 
 
-def trading_day_status(target: date | None = None) -> str:
+def trading_day_status(target: Optional[date] = None) -> str:
     """영업일 상태 문자열 반환 (로그/표시용)."""
     if target is None:
         target = date.today()

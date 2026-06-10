@@ -27,6 +27,7 @@
   → 상승장 확인 시 손절 완화(-3% → -5%), 지표 매도 임계 강화
 """
 import pandas as pd
+from typing import Dict
 from strategy.base import BaseStrategy
 from utils.logger import log
 
@@ -42,13 +43,13 @@ class Kospi200ComplexStrategy(BaseStrategy):
 
     def __init__(
         self,
-        stop_loss_normal: float = -3.0,    # 횡보장 손절 기준 (%)
-        stop_loss_bull:   float = -5.0,    # 상승장 손절 기준 (완화)
+        stop_loss_normal: float = -5.0,    # 황보장 손절 기준 (%) ← -3→-5%로 완화 (불필요한 조기 손절 방지)
+        stop_loss_bull:   float = -7.0,    # 상승장 손절 기준 (완화)
     ):
         self.stop_loss_normal = stop_loss_normal
         self.stop_loss_bull   = stop_loss_bull
         # 종목별 고점 추적 딕셔너리 (트레일링 스탑)
-        self._peak: dict[str, float] = {}
+        self._peak: Dict[str, float] = {}
 
     # ─── 보조지표 ────────────────────────────────────────────────
 
@@ -157,10 +158,12 @@ class Kospi200ComplexStrategy(BaseStrategy):
 
         score = sum([bb_ok, macd_cross, rsv_ok, bull_follow])
 
-        if score >= 2:
+        # 파산 방지: 매수 신호 품질 향상 (2점 → 3점 이상으로 임계값 상향)
+        # 매수 횟수 줄이고 신호 품질 높여 손절 빈도 저하
+        if score >= 3:
             log.info(
                 f"[전략] 🟢 매수 - {stock_code} "
-                f"({'상승장' if bull else '횡보장'} | 점수:{score}/4 | "
+                f"({'상승장' if bull else '황보장'} | 점수:{score}/4 | "
                 f"BB:{bb_ok} MACD:{macd_cross} RSV:{c['rsv']:.0f} 추세:{bull_follow})"
             )
             return True

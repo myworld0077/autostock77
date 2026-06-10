@@ -5,6 +5,7 @@
 매도 조건: 당일 종가에 전량 매도 (익일 시가에 매도)
 """
 import pandas as pd
+from typing import Optional
 from strategy.base import BaseStrategy
 from utils.logger import log
 
@@ -21,7 +22,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         """
         self.k = k
 
-    def _calc_target_price(self, df: pd.DataFrame) -> float | None:
+    def _calc_target_price(self, df: pd.DataFrame) -> Optional[float]:
         """목표가 계산: 당일 시가 + 전일 레인지 × K"""
         if len(df) < 2:
             return None

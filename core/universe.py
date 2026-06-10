@@ -5,12 +5,13 @@ import requests
 import FinanceDataReader as fdr
 import time
 from datetime import datetime
+from typing import List
 from utils.logger import log
 from core.market import get_current_price
 
 
 # ── 마지막 성공한 top150 캐시 (장외 시간 재활용) ─────────────────────
-_cached_top150: list[str] = []
+_cached_top150: List[str] = []
 _cached_top150_at: str = ""   # "YYYYMMDD" 형식
 
 
@@ -21,7 +22,7 @@ def _is_market_open() -> bool:
     return 9 * 60 <= t <= 15 * 60 + 30
 
 
-def _method1_snap_reader() -> list[str]:
+def _method1_snap_reader() -> List[str]:
     """방법 1: fdr.SnapDataReader (KRX 인덱스 구성종목)"""
     df = fdr.SnapDataReader('KRX/INDEX/STOCK/1028')
     if df is None or df.empty:
@@ -35,7 +36,7 @@ def _method1_snap_reader() -> list[str]:
     return codes
 
 
-def _method2_stock_listing() -> list[str]:
+def _method2_stock_listing() -> List[str]:
     """방법 2: fdr.StockListing('KOSPI') → 시가총액 상위 200개 근사"""
     df = fdr.StockListing('KOSPI')
     if df is None or df.empty:
@@ -56,7 +57,7 @@ def _method2_stock_listing() -> list[str]:
     return codes
 
 
-def _method3_krx_http() -> list[str]:
+def _method3_krx_http() -> List[str]:
     """방법 3: KRX 정보데이터시스템 직접 HTTP 요청"""
     url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
     headers = {
@@ -84,7 +85,7 @@ def _method3_krx_http() -> list[str]:
     return codes
 
 
-def get_kospi200_universe() -> list[str]:
+def get_kospi200_universe() -> List[str]:
     """
     코스피 200 구성 종목 코드를 가져옵니다.
     3가지 방법을 순서대로 시도하고, 모두 실패 시 Fallback 반환.
@@ -115,7 +116,7 @@ def get_kospi200_universe() -> list[str]:
     return fallback
 
 
-def get_kis_kospi200_top150() -> list[str]:
+def get_kis_kospi200_top150() -> List[str]:
     """
     코스피 200 종목을 가져온 뒤, 한국투자증권 API를 통해 현재 시가총액을 자동 업데이트하고
     시가총액 기준 상위 150개 종목만 필터링하여 반환합니다.
@@ -216,11 +217,11 @@ _SECTOR_KEYWORDS = [
     '장비', '팹리스', '전기차', '전해질', '분리막',
 ]
 
-_cached_kosdaq: list[str] = []
+_cached_kosdaq: List[str] = []
 _cached_kosdaq_at: str = ""
 
 
-def get_kosdaq150_energy_semi() -> list[str]:
+def get_kosdaq150_energy_semi() -> List[str]:
     """코스닥 시총 상위 150개 중 에너지·반도체 관련 종목 추출."""
     global _cached_kosdaq, _cached_kosdaq_at
 

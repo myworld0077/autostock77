@@ -11,11 +11,22 @@ AutoStock - 주식 자동매매 메인 엔진
     python main.py --dashboard  # 웹 대시보드만 실행
 """
 import sys
+import os
 import time
 import argparse
 import schedule
 import threading
 from datetime import datetime, date as _date
+from typing import List, Optional, Dict
+
+# 리눅스(오라클 클라우드 등) 환경 타임존 KST 동기화
+if sys.platform != "win32":
+    os.environ["TZ"] = "Asia/Seoul"
+    try:
+        time.tzset()
+    except AttributeError:
+        pass
+
 
 from config.settings import settings
 from core.market import get_current_price, get_daily_ohlcv
@@ -26,6 +37,7 @@ from strategy.ma_cross import MovingAverageCrossStrategy
 from strategy.volatility import VolatilityBreakoutStrategy
 from strategy.complex import Kospi200ComplexStrategy
 from core.universe import get_kis_kospi200_top150, get_kosdaq150_energy_semi
+from core.watchlist_manager import get_dynamic_watchlist
 from core.calendar import is_trading_day, trading_day_status, next_trading_day, verify_market_open_strict
 from utils.logger import log
 from utils import notifier
@@ -50,8 +62,30 @@ WATCH_LIST = [
 # ─── 알림 임계값 상수 ──────────────────────────────────
 SURGE_HELD_PCT = 3.0    # 보유종목 급변동 기준 (%)
 SURGE_WATCH_PCT = 5.0    # 감시종목 급변동 기준 (%)
-EMERGENCY_DROP = -10.0  # 긴급 하락 기준 (%)
+EMERGENCY_DROP = -5.0   # 긴급 하락 기준 (%) ← -10→-5%로 타이트하게 수정 (빠른 손절)
 SURGE_COOLDOWN_S = 1800   # 급변동 알림 쿨다운 (초, 30분)
+
+
+# ─── 초기 투자금 추적 ──────────────────────────────────────────
+import json as _json
+_INIT_CAP_FILE = "initial_capital.json"
+
+def _load_initial_capital() -> float:
+    """저장된 초기 투자금 로드 (없으면 0 반환)"""
+    try:
+        with open(_INIT_CAP_FILE, "r", encoding="utf-8") as f:
+            return float(_json.load(f).get("initial_capital", 0))
+    except Exception:
+        return 0.0
+
+def _save_initial_capital(amount: float):
+    """초기 투자금 파일에 저장"""
+    try:
+        with open(_INIT_CAP_FILE, "w", encoding="utf-8") as f:
+            _json.dump({"initial_capital": amount, "recorded_at": datetime.now().isoformat()}, f, ensure_ascii=False)
+        log.info(f"[초기투자금] 기록 완료: {amount:,.0f}원")
+    except Exception as e:
+        log.warning(f"[초기투자금] 저장 실패: {e}")
 
 
 class AutoTrader:
@@ -59,15 +93,19 @@ class AutoTrader:
 
     KOSDAQ_RATIO = 0.10  # 코스닥 에너지·반도체 투자 비중 한도 (총자산의 10%)
 
-    def __init__(self, strategy: BaseStrategy, watch_list: list[str],
-                 kosdaq_watch_list: list[str] | None = None):
+    def __init__(self, strategy: BaseStrategy, watch_list: List[str],
+                 kosdaq_watch_list: Optional[List[str]] = None):
         self.strategy = strategy
+        self.universe_watch_list = watch_list
         self.watch_list = watch_list
         self.kosdaq_watch_list = kosdaq_watch_list or []
-        self.trade_log: list[dict] = []         # 거래 이력
-        self._price_cache: dict[str, int] = {}  # 이전 사이클 가격 (급변동 감지용)
-        self._emergency_alerted: set[str] = set()       # 긴급 알림 발송 완료 종목
-        self._surge_alerted: dict[str, float] = {}      # 급변동 알림 발송 시각 (쿨다운)
+        self.trade_log: List[dict] = []         # 거래 이력
+        self._price_cache: Dict[str, int] = {}  # 이전 사이클 가격 (급변동 감지용)
+        self._emergency_alerted: set = set()       # 긴급 알림 발송 완료 종목
+        self._surge_alerted: Dict[str, float] = {}      # 급변동 알림 발송 시각 (쿨다운)
+        # ── 버그 방지용 당일 추적 세트 ──
+        self._force_sell_failed: set = set()  # 강제 익절 실패 종목 (당일 재시도 차단)
+        # 물타기(_avg_down_done) 완전 제거 — 파산의 핵심 원인이었음
 
     # ── 급변동 감지 헬퍼 ──────────────────────────────────
     def _check_surge(self, code: str, name: str, cur_price: int, is_held: bool):
@@ -118,10 +156,11 @@ class AutoTrader:
             log.error(f"잔고 조회 실패: {e}")
             return
 
-        # ── 자산 비중 관리 ──
-        total_asset = balance["cash"] + balance["total_eval"]
-        max_normal_invest = total_asset * 0.6  # 정상 매수 한도 (60%)
-        max_total_invest = total_asset * 0.8   # 예비군 포함 매수 한도 (80%) - 절대 보존 20%
+        # ── 자산 비중 관리 (파산 방지 수정) ──
+        # 총자산 비례 계산 제거 → 현금 기반으로만 판단 (예수금 마이너스 폭주 차단)
+        total_asset = max(balance["cash"], 0)  # 마이너스 예수금은 0으로 취급
+        # 정상 매수 한도: 현재 보유 주식 평가액이 예수금의 50% 이내일 때만 매수 허용
+        max_normal_invest = max(balance["cash"], 0) * 0.5
 
         # 1) 보유 종목: 급락 물타기 + 매도 체크
         sold_codes: set[str] = set()
@@ -135,22 +174,20 @@ class AutoTrader:
                     # 급변동 감지 (보유종목 ±3%)
                     self._check_surge(code, h["name"], h["cur_price"], is_held=True)
 
-                    # [추가] 수익 시 현찰 보유: 예비군 투입 상태(>60%)일 때 0.5% 이상 수익 시 강제 익절
-                    force_sell = False
-                    if balance["total_eval"] > max_normal_invest and h["profit_rate"] > 0.5:
-                        log.info(f"💡 예비군 투입 상태 + 수익 전환 → 현찰 보유를 위한 강제 익절: {h['name']}")
-                        force_sell = True
-
+                    # ── 전략 매도 판단 ──
+                    # 물타기 완전 제거 (파산의 핵심 원인) — 손절은 전략의 should_sell에서만 수행
                     df = get_daily_ohlcv(code)
-                    if force_sell or self.strategy.should_sell(code, df, h["cur_price"], h["avg_price"]):
+                    if self.strategy.should_sell(code, df, h["cur_price"], h["avg_price"]):
                         if is_paused:
                             log.info(f"  ⏸️ 일시중지 중 - 매도 조건 충족이나 보류: {h['name']}({code})")
                         else:
-                            result = sell_market(code, h["qty"])
+                            # 분할 매도: 보유수량이 500주 초과 시 500주씩 나눠 주문 (모의투자 한도 방지)
+                            sell_qty = min(h["qty"], 500) if h["qty"] > 500 else h["qty"]
+                            result = sell_market(code, sell_qty)
                             if result["success"]:
                                 sold_codes.add(code)
                                 notifier.notify_sell(
-                                    code, h["name"], h["qty"],
+                                    code, h["name"], sell_qty,
                                     h["cur_price"], h["profit_rate"]
                                 )
                                 self.trade_log.append({
@@ -158,31 +195,14 @@ class AutoTrader:
                                     "side": "sell",
                                     "code": code,
                                     "name": h["name"],
-                                    "qty": h["qty"],
+                                    "qty": sell_qty,
                                     "price": h["cur_price"],
                                     "profit_rate": h["profit_rate"],
                                 })
-                                balance["total_eval"] -= (h["qty"] * h["cur_price"])
-                                balance["cash"] += (h["qty"] * h["cur_price"])
-                                continue  # 매도 성공 시 물타기 체크 안 함
-
-                    # [추가] 예비군성격 20% 급락시 투입 (물타기)
-                    if (h["profit_rate"] <= EMERGENCY_DROP
-                            and balance["total_eval"] < max_total_invest):
-                        if is_paused:
-                            log.info(f"  ⏸️ 일시중지 중 - 급락 물타기 조건 충족이나 보류: {h['name']}({code})")
-                        else:
-                            available_reserve = max_total_invest - balance["total_eval"]
-                            target_reserve_amt = min(available_reserve, total_asset * 0.1)
-
-                            qty = int(target_reserve_amt // h["cur_price"])
-                            if qty > 0 and (qty * h["cur_price"] <= balance["cash"]):
-                                log.info(f"🚨 급락 감지! 예비군 투입 (물타기) → {h['name']} {qty}주 매수")
-                                r = buy_market(code, qty)
-                                if r["success"]:
-                                    notifier.notify_buy(code, h["name"], qty, h["cur_price"])
-                                balance["total_eval"] += (qty * h["cur_price"])
-                                balance["cash"] -= (qty * h["cur_price"])
+                                balance["total_eval"] -= (sell_qty * h["cur_price"])
+                                balance["cash"] += (sell_qty * h["cur_price"])
+                            else:
+                                log.warning(f"  ⚠️ 매도 실패: {h['name']}({code}) {sell_qty}주")
 
                 except Exception as e:
                     log.error(f"매도/물타기 처리 오류 ({code}): {e}")
@@ -193,9 +213,18 @@ class AutoTrader:
 
         # 2) 감시 종목 매수 체크 (정상 한도 60% 내에서만 매수)
         held_codes = {h["code"] for h in holdings} - sold_codes
+        
+        # KOSPI 150 유니버스인 경우, 남은 슬롯만큼 감시 종목 동적 선정
+        if len(self.universe_watch_list) > settings.MAX_STOCKS:
+            max_slots = settings.MAX_STOCKS - len(held_codes)
+            self.watch_list = get_dynamic_watchlist(self.universe_watch_list, held_codes, max_slots)
+            
         normal_cash_available = max_normal_invest - balance["total_eval"]
 
-        if len(held_codes) >= settings.MAX_STOCKS:
+        if balance["cash"] <= 0:
+            log.warning(f"⚠️ 예수금이 부족하거나 마이너스 상태입니다 ({balance['cash']:,}원) - 신규 매수 스킵")
+            log.warning("👉 KIS 모의투자 홈페이지에서 '모의투자 초기화'가 필요할 수 있습니다.")
+        elif len(held_codes) >= settings.MAX_STOCKS:
             log.info(f"⚠️ 최대 보유 종목 수({settings.MAX_STOCKS}) 도달 - 매수 스킵")
         elif normal_cash_available <= 0:
             log.info("⚠️ 정상 매수 한도(자산 60%) 소진 - 현금 40% 보존을 위해 신규 매수 스킵")
@@ -217,25 +246,22 @@ class AutoTrader:
                         if is_paused:
                             log.info(f"  ⏸️ 일시중지 중 - 매수 조건 충족이나 보류: {name}({code})")
                         else:
-                            # 현금 40% 상시 보유를 위해 정상 가용 금액(normal_cash_available) 내에서 분할 매수
-                            remaining_slots = max(1, settings.MAX_STOCKS - len(held_codes))
-                            target_buy_amt = normal_cash_available // remaining_slots
+                            # 파산 방지: 총자산 비례 방식 제거 → BUY_AMOUNT 고정 금액 1회 매수
+                            # (BUY_AMOUNT = .env에서 설정, 기본 100,000원)
+                            target_buy_amt = settings.BUY_AMOUNT
+
+                            # 현금이 목표 금액보다 적으면 현금 전역
+                            avail_cash = balance["cash"]
+                            if avail_cash < target_buy_amt:
+                                target_buy_amt = avail_cash
 
                             qty = int(target_buy_amt // cur_price)
                             if qty <= 0:
-                                msg = f"  {name}({code}) - 매수 금액 부족 (현재가: {cur_price:,}원, 할당금액: {target_buy_amt:,}원)"
-                                log.info(msg)
+                                log.info(f"  {name}({code}) - 매수 금액 부족 (현재가: {cur_price:,}원, 예수금: {avail_cash:,}원)")
                                 continue
-
-                            if qty * cur_price > balance["cash"]:
-                                qty = int(balance["cash"] // cur_price)
-                                if qty <= 0:
-                                    log.info(f"  {name}({code}) - 예수금 부족")
-                                    continue
 
                             result = buy_market(code, qty)
                             if result["success"]:
-                                normal_cash_available -= (qty * cur_price)
                                 balance["total_eval"] += (qty * cur_price)
                                 balance["cash"] -= (qty * cur_price)
                                 held_codes.add(code)  # 보유 목록 업데이트 (슬롯 계산용)
@@ -254,16 +280,16 @@ class AutoTrader:
                     log.error(f"매수 처리 오류 ({code}): {e}")
                 time.sleep(0.5)
 
-        # 3) 코스닥 에너지·반도체 매수 체크 (총자산의 10% 한도)
+        # 3) 코스닥 에너지·반도체 매수 체크 (현금의 10% 한도)
         kosdaq_set = set(self.kosdaq_watch_list)
         if kosdaq_set and len(held_codes) < settings.MAX_STOCKS:
-            # 현재 코스닥 보유 금액 계산
+            # 코스닥 한도: 예수금(cash)의 10%로 고정 (총자산 비례 제거)
             kosdaq_held_eval = sum(
                 h["qty"] * h["cur_price"]
                 for h in holdings
                 if h["code"] in kosdaq_set and h["code"] not in sold_codes
             )
-            kosdaq_limit = total_asset * self.KOSDAQ_RATIO  # 총자산의 10%
+            kosdaq_limit = max(balance["cash"], 0) * self.KOSDAQ_RATIO
             kosdaq_available = kosdaq_limit - kosdaq_held_eval
 
             if kosdaq_available <= 0:
@@ -389,7 +415,11 @@ def main():
     log.info("=" * 50)
     log.info("  AutoStock 자동매매 시작")
     log.info(f"  모드: {'[Paper] 모의투자' if settings.is_paper else '[Real] 실전투자'}")
-    log.info(f"  감시 종목: KOSPI {len(watch_list)}개 + KOSDAQ {len(kosdaq_watch_list)}개")
+    if len(watch_list) > settings.MAX_STOCKS:
+        log.info(f"  감시 종목: KOSPI 유니버스 {len(watch_list)}개 중 매 사이클 최적 {settings.MAX_STOCKS}개 동적 선정")
+        log.info(f"             + KOSDAQ {len(kosdaq_watch_list)}개")
+    else:
+        log.info(f"  감시 종목: KOSPI {len(watch_list)}개 + KOSDAQ {len(kosdaq_watch_list)}개")
     log.info(f"  1회 매수 금액: {settings.BUY_AMOUNT:,}원")
     if kosdaq_watch_list:
         log.info(f"  코스닥 비중 한도: 총자산의 {AutoTrader.KOSDAQ_RATIO*100:.0f}%")
@@ -401,6 +431,28 @@ def main():
     trader = AutoTrader(strategy=strategy, watch_list=watch_list,
                         kosdaq_watch_list=kosdaq_watch_list)
 
+    # ─── 초기 투자금 기록 (최초 1회만) ─────────────────────────────────
+    _existing_cap = _load_initial_capital()
+    if _existing_cap <= 0:
+        try:
+            _init_bal = get_balance()
+            _init_total = _init_bal["cash"] + _init_bal["total_eval"]
+            _save_initial_capital(_init_total)
+            log.info(f"[초기투자금] 최초 기록: {_init_total:,.0f}원 "
+                     f"(예수금 {_init_bal['cash']:,} + 평가 {_init_bal['total_eval']:,})")
+        except Exception as _e:
+            log.warning(f"[초기투자금] 조회 실패 (나중에 재시도): {_e}")
+    else:
+        try:
+            _cur_bal = get_balance()
+            _cur_total = _cur_bal["cash"] + _cur_bal["total_eval"]
+            _cum_pnl = _cur_total - _existing_cap
+            _cum_rate = _cum_pnl / _existing_cap * 100 if _existing_cap > 0 else 0
+            log.info(f"[초기투자금] 기존 기록: {_existing_cap:,.0f}원 | "
+                     f"현재: {_cur_total:,.0f}원 | 누적손익: {_cum_pnl:+,.0f}원 ({_cum_rate:+.2f}%)")
+        except Exception as _e:
+            log.warning(f"[초기투자금] 누적 수익률 조회 실패: {_e}")
+
     if args.once:
         trader.run_cycle()
         return
@@ -411,7 +463,7 @@ def main():
         (9,  0, 15, 30, "KRX 정규장"),
     ]
 
-    def get_current_session(dt: datetime) -> str | None:
+    def get_current_session(dt: datetime) -> Optional[str]:
         """현재 시각이 속한 세션명 반환. 장외 시간이면 None."""
         t = dt.hour * 60 + dt.minute
         for sh, sm, eh, em, name in SESSIONS:
@@ -422,14 +474,14 @@ def main():
     # ─── 오늘 영업일 확인 + 현재 세션 계산 ──────────────────────────
     now = datetime.now()
     today = now.date()
-    session: str | None = get_current_session(now)
+    session: Optional[str] = get_current_session(now)
 
-    last_session: str | None = session
+    last_session: Optional[str] = session
     last_date: _date = today
     is_today_trading: bool = is_trading_day(today)  # 당일 영업일 여부 캐싱
     is_paused_by_user: bool = False
-    morning_report_sent_date: _date | None = None   # 장전 리포트 당일 전송 완료 날짜
-    trade_report_sent_date: _date | None = None     # 15:40 매매내역 리포트 당일 전송 완료 날짜
+    morning_report_sent_date: Optional[_date] = None   # 장전 리포트 당일 전송 완료 날짜
+    trade_report_sent_date: Optional[_date] = None     # 15:40 매매내역 리포트 당일 전송 완료 날짜
 
     # 영업일 상태 로그 (캐싱된 is_today_trading 사용 — 재호출 방지)
     if is_today_trading:
@@ -524,7 +576,6 @@ def main():
                     log.info(f"[USER CONTROL] 텔레그램 '2' 수신 → 즉시 상태 조회 응답 (가동={is_actually_running})")
                     
                     try:
-                        from core.account import get_balance
                         balance_info = get_balance()
                     except Exception as e:
                         log.warning(f"상태 조회 중 잔고 조회 실패: {e}")
@@ -547,6 +598,10 @@ def main():
                 morning_report_sent_date = None   # 날짜 변경 시 장전 리포트 플래그 리셋
                 trade_report_sent_date = None     # 날짜 변경 시 15:40 매매내역 리포트 플래그 리셋
                 trader.trade_log.clear()          # 이전 영업일의 매매내역 클리어
+                # ★ 버그 수정: 당일 추적 세트 날짜 변경 시 초기화
+                trader._force_sell_failed.clear()  # 강제 익절 실패 기록 초기화
+                trader._avg_down_done.clear()      # 물타기 완료 기록 초기화
+                log.info("[RESET] 당일 추적 세트 초기화 완료 (강제익절·물타기 제한 리셋)")
                 is_today_trading = is_trading_day(today)
                 status = trading_day_status(today)
                 log.info(f"[CALENDAR] 날짜 변경 → {status}")

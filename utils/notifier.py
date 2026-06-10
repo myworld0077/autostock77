@@ -738,7 +738,7 @@ def request_real_trading_approval(timeout_seconds: int = 120) -> bool:
             return False
 
 
-def _timed_input(prompt: str, timeout: int) -> str | None:
+def _timed_input(prompt: str, timeout: int) -> "Optional[str]":
     """타임아웃이 있는 입력 (Windows/Linux 공용)"""
     import threading
     result = [None]

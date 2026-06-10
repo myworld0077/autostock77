@@ -8,6 +8,7 @@ AutoStock 컨트롤 런처
 import subprocess
 import sys
 import os
+from typing import Optional
 
 # stdout UTF-8 강제 (Windows cp949 이모지 오류 방지)
 import io
@@ -19,8 +20,8 @@ try:
 except Exception:
     pass
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_proc: subprocess.Popen | None = None
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+_proc: Optional[subprocess.Popen] = None
 
 
 def is_running() -> bool:

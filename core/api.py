@@ -8,6 +8,7 @@ import os
 import json
 import time
 import requests
+from typing import Dict, Optional
 from config.settings import settings
 from utils.logger import log
 
@@ -192,7 +193,7 @@ class KoreaInvestAPI:
             headers["HTS_ID"] = settings.HTS_ID
         return headers
 
-    def get(self, path: str, tr_id: str, params: dict | None = None) -> dict:
+    def get(self, path: str, tr_id: str, params: Optional[Dict] = None) -> dict:
         """GET 요청 (최대 5회 재시도 / 500 에러는 즉시 포기 / 지수 백오프 적용)"""
         url = f"{self.base_url}{path}"
         headers = self._headers(tr_id)

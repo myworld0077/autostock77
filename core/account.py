@@ -6,6 +6,7 @@
 from core.api import api
 from config.settings import settings
 from utils.logger import log
+from typing import List
 
 
 def _to_int(value, default: int = 0) -> int:
@@ -60,7 +61,7 @@ def get_balance() -> dict:
     }
 
 
-def get_holdings() -> list[dict]:
+def get_holdings() -> List[dict]:
     """
     보유 종목 목록 조회
 
