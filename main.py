@@ -60,10 +60,11 @@ WATCH_LIST = [
 
 
 # ─── 알림 임계값 상수 ──────────────────────────────────
-SURGE_HELD_PCT = 3.0    # 보유종목 급변동 기준 (%)
-SURGE_WATCH_PCT = 5.0    # 감시종목 급변동 기준 (%)
-EMERGENCY_DROP = -5.0   # 긴급 하락 기준 (%) ← -10→-5%로 타이트하게 수정 (빠른 손절)
+SURGE_HELD_PCT   = 3.0    # 보유종목 급변동 기준 (%)
+SURGE_WATCH_PCT  = 5.0    # 감시종목 급변동 기준 (%)
+EMERGENCY_DROP   = -5.0   # 긴급 하락 기준 (%)
 SURGE_COOLDOWN_S = 1800   # 급변동 알림 쿨다운 (초, 30분)
+DAILY_LOSS_LIMIT = -5.0   # 일일 손실 한도 (%) — 초과 시 당일 매매 자동 중단
 
 
 # ─── 초기 투자금 추적 ──────────────────────────────────────────
@@ -99,13 +100,13 @@ class AutoTrader:
         self.universe_watch_list = watch_list
         self.watch_list = watch_list
         self.kosdaq_watch_list = kosdaq_watch_list or []
-        self.trade_log: List[dict] = []         # 거래 이력
-        self._price_cache: Dict[str, int] = {}  # 이전 사이클 가격 (급변동 감지용)
-        self._emergency_alerted: set = set()       # 긴급 알림 발송 완료 종목
-        self._surge_alerted: Dict[str, float] = {}      # 급변동 알림 발송 시각 (쿨다운)
-        # ── 버그 방지용 당일 추적 세트 ──
-        self._force_sell_failed: set = set()  # 강제 익절 실패 종목 (당일 재시도 차단)
-        # 물타기(_avg_down_done) 완전 제거 — 파산의 핵심 원인이었음
+        self.trade_log: List[dict] = []              # 거래 이력
+        self._price_cache: Dict[str, int] = {}       # 이전 사이클 가격 (급변동 감지용)
+        self._emergency_alerted: Set[str] = set()    # 긴급 알림 발송 완료 종목
+        self._surge_alerted: Dict[str, float] = {}   # 급변동 알림 발송 시각 (쿨다운)
+        self._force_sell_failed: Set[str] = set()    # 강제 익절 실패 종목 (당일 재시도 차단)
+        self._sold_today: Set[str] = set()           # 당일 매도 종목 (재매수 쿨다운용)
+        self._daily_loss_halted: bool = False        # 일일 손실 한도 초과 → 매매 중단 플래그
 
     # ── 급변동 감지 헬퍼 ──────────────────────────────────
     def _check_surge(self, code: str, name: str, cur_price: int, is_held: bool):
@@ -142,6 +143,8 @@ class AutoTrader:
         """1 사이클: 매도 체크 → 매수 체크 (is_paused면 매매는 스킵하고 모니터링만)"""
         log.info("=" * 50)
         state_msg = " (일시중지 - 모니터링만 수행)" if is_paused else ""
+        if self._daily_loss_halted:
+            state_msg += " [⛔ 일일손실한도 초과 — 금일 신규매수 중단]"
         log.info(f"📊 자동매매 사이클 시작 | 전략: {self.strategy.name}{state_msg}")
         log.info(f"   시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         log.info("=" * 50)
@@ -152,6 +155,21 @@ class AutoTrader:
             log.info(f"💰 예수금: {balance['cash']:,}원 | "
                      f"총평가: {balance['total_eval']:,}원 | "
                      f"손익: {balance['total_profit']:,}원")
+
+            # ── 일일 손실 한도 체크 ──────────────────────────────
+            if balance.get('profit_rate', 0) <= DAILY_LOSS_LIMIT:
+                if not self._daily_loss_halted:
+                    self._daily_loss_halted = True
+                    log.warning(
+                        f"⛔ [일일손실한도] 수익률 {balance['profit_rate']:.2f}% "
+                        f"≤ {DAILY_LOSS_LIMIT}% → 금일 신규 매수 자동 중단"
+                    )
+                    notifier.send_message(
+                        f"⛔ <b>[일일손실한도 초과]</b>\n"
+                        f"현재 수익률: {balance['profit_rate']:.2f}%\n"
+                        f"한도: {DAILY_LOSS_LIMIT}%\n"
+                        f"금일 신규 매수를 자동 중단합니다."
+                    )
         except Exception as e:
             log.error(f"잔고 조회 실패: {e}")
             return
@@ -181,11 +199,12 @@ class AutoTrader:
                         if is_paused:
                             log.info(f"  ⏸️ 일시중지 중 - 매도 조건 충족이나 보류: {h['name']}({code})")
                         else:
-                            # 분할 매도: 보유수량이 500주 초과 시 500주씩 나눠 주문 (모의투자 한도 방지)
+                            # 분할 매도: 보유수량이 500주 초과 시 500주씩 나눠 주문
                             sell_qty = min(h["qty"], 500) if h["qty"] > 500 else h["qty"]
                             result = sell_market(code, sell_qty)
                             if result["success"]:
                                 sold_codes.add(code)
+                                self._sold_today.add(code)  # 당일 재매수 쿨다운 등록
                                 notifier.notify_sell(
                                     code, h["name"], sell_qty,
                                     h["cur_price"], h["profit_rate"]
@@ -228,10 +247,15 @@ class AutoTrader:
             log.info(f"⚠️ 최대 보유 종목 수({settings.MAX_STOCKS}) 도달 - 매수 스킵")
         elif normal_cash_available <= 0:
             log.info("⚠️ 정상 매수 한도(자산 60%) 소진 - 현금 40% 보존을 위해 신규 매수 스킵")
+        elif self._daily_loss_halted:
+            log.warning("⛔ 일일 손실 한도 초과 — 신규 매수 스킵")
         else:
             for code in self.watch_list:
                 if code in held_codes:
                     continue  # 이미 보유 중
+                if code in self._sold_today:
+                    log.info(f"  ⏸ {code} — 당일 매도 종목 재매수 쿨다운 (내일 재진입 가능)")
+                    continue
 
                 try:
                     price_info = get_current_price(code)
@@ -376,24 +400,17 @@ def main():
         sys.exit(1)
     log.info(f"[CONFIG] {settings.describe()}")
 
-    # ─── 6월 5일까지 모의투자 강제 및 사용자 권한 확인 ───
-    current_date = datetime.now().date()
-    target_date = _date(2026, 6, 5)
-
-    if current_date <= target_date:
-        if settings.TRADE_MODE != "paper":
-            log.warning("⚠️ [안전 조치] 2026년 6월 5일까지는 강제로 '모의투자(paper)' 모드로 실행됩니다.")
-            settings.TRADE_MODE = "paper"
-            log.warning("👉 주의: .env에 PAPER_APP_KEY, PAPER_APP_SECRET, PAPER_CANO 가 설정되어 있어야 합니다.")
+    # ─── 투자 모드 확인 (모의/실전) ───────────────────────────
+    if settings.TRADE_MODE != "paper":
+        log.warning("[REAL] 실전투자 모드입니다. 승인을 진행합니다.")
+        approved = notifier.request_real_trading_approval(timeout_seconds=120)
+        if not approved:
+            log.info("[REAL] 사용자가 실전투자 실행을 취소했습니다.")
+            notifier.notify_stop("실전투자 승인 거부 또는 시간 초과")
+            sys.exit(0)
+        log.info("[REAL] 승인 완료 → 실전투자를 시작합니다.")
     else:
-        if settings.TRADE_MODE != "paper":
-            log.warning("[REAL] 6월 5일이 경과하여 '실전투자(real)' 모드 진입이 가능합니다.")
-            approved = notifier.request_real_trading_approval(timeout_seconds=120)
-            if not approved:
-                log.info("[REAL] 사용자가 실전투자 실행을 취소했습니다.")
-                notifier.notify_stop("실전투자 승인 거부 또는 시간 초과")
-                sys.exit(0)
-            log.info("[REAL] 승인 완료 → 실전투자를 시작합니다.")
+        log.info("[Paper] 모의투자 모드로 실행합니다.")
 
     # 전략 및 감시 종목 선택
     kosdaq_watch_list = []
@@ -598,10 +615,11 @@ def main():
                 morning_report_sent_date = None   # 날짜 변경 시 장전 리포트 플래그 리셋
                 trade_report_sent_date = None     # 날짜 변경 시 15:40 매매내역 리포트 플래그 리셋
                 trader.trade_log.clear()          # 이전 영업일의 매매내역 클리어
-                # ★ 버그 수정: 당일 추적 세트 날짜 변경 시 초기화
+                # ★ 날짜 변경 시 당일 추적 세트 전체 초기화
                 trader._force_sell_failed.clear()  # 강제 익절 실패 기록 초기화
-                trader._avg_down_done.clear()      # 물타기 완료 기록 초기화
-                log.info("[RESET] 당일 추적 세트 초기화 완료 (강제익절·물타기 제한 리셋)")
+                trader._sold_today.clear()         # 당일 매도 종목 쿨다운 리셋
+                trader._daily_loss_halted = False  # 일일 손실 한도 플래그 리셋
+                log.info("[RESET] 날짜 변경 → 당일 추적 세트 초기화 완료")
                 is_today_trading = is_trading_day(today)
                 status = trading_day_status(today)
                 log.info(f"[CALENDAR] 날짜 변경 → {status}")

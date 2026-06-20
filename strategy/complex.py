@@ -1,30 +1,27 @@
 """
-복합 지표 매매 전략 — 비대칭 리스크 구조
-"상승은 열어두고, 하방은 닫는다" (손실최소·이익최대)
+복합 지표 매매 전략 — 보완 v2 (모의투자 1개월 성과 반영)
 
-=== 설계 철학 ===
+=== 성과 분석 기반 개편 내용 ===
 
-  [하방 차단]
-    ① 손절: 매수가 대비 -3% → 즉시 전량 청산 (손실 한도 고정)
-    ② 수익권 진입 후: 수익 단계별 트레일링 스탑으로 이익 보호
+  [문제점 → 개선]
+  ① 손절 -5% 너무 관대  →  -3%로 재조정 (손실 한도 축소)
+  ② 매수 조건 3/4점     →  4/4점 완벽 조건만 매수 (진입 품질 향상)
+  ③ 수익 0~3% 트레일링 없음 →  1~3%에서도 고점 -1.5% 시 조기 청산 추가
+  ④ 상승장 완화 조건 축소  →  상승장도 -5% 손절 유지 (완화 제거)
 
-  [상방 개방]
-    ① 고정 익절(take-profit) 없음 → 추세가 살아있는 한 보유 유지
-    ② 수익이 커질수록 트레일링 스탑 여유를 확대
-       → 작은 눌림목에 청산되지 않고 큰 추세 탑승 가능
-    ③ 지표 매도: BB상단 + MACD데드크로스 + RSV과매수 3개 모두 일치 시만 청산
-       (단일 조건으로 섣불리 매도 금지)
+=== 트레일링 스탑 단계 (v2) ===
 
-=== 트레일링 스탑 단계 (2026년 1~5월 일평균 변동폭 1.2~1.8% 반영) ===
+  수익 0~1%  → 손절 구간 (-3% 고정)
+  수익 1~3%  → 고점 대비 -1.5% 하락 시 청산 (조기 이익 확보)
+  수익 3~8%  → 고점 대비 -2.0% 하락 시 청산
+  수익 8~15% → 고점 대비 -3.0% 하락 시 청산
+  수익 15%+  → 고점 대비 -4.0% 하락 시 청산
 
-  수익 0~3%  → 손절 -3% (원금 보호 구간)
-  수익 3~8%  → 고점 대비 -2.0% 하락 시 청산 (이익 확보)
-  수익 8~15% → 고점 대비 -3.0% 하락 시 청산 (추세 추종)
-  수익 15%+  → 고점 대비 -5.0% 하락 시 청산 (대세 상승 탑승)
-
-=== 상승장 감지 (MA 배열) ===
-  20일 MA > 60일 MA + 현재가 > 20일 MA + 60일 MA 기울기 양수
-  → 상승장 확인 시 손절 완화(-3% → -5%), 지표 매도 임계 강화
+=== 매수 조건 (4개 모두 충족 시만 매수) ===
+  ① BB 하단 근접 (동적 여유폭)
+  ② MACD 골든크로스
+  ③ RSV 과매도 (≤30)
+  ④ 상승장 추세 (MA20 위 + MACD 크로스) 또는 거래량 급증
 """
 import pandas as pd
 from typing import Dict
@@ -34,20 +31,19 @@ from utils.logger import log
 
 class Kospi200ComplexStrategy(BaseStrategy):
     """
-    코스피 200 비대칭 리스크 전략
-    - 하방 차단: 손절 -3%, 수익권 트레일링 스탑
-    - 상방 개방: 고정 익절 없음, 추세 지속 시 무한 보유
+    코스피 200 비대칭 리스크 전략 v2 (모의투자 성과 반영)
+    - 손절 -3% (기존 -5%에서 강화)
+    - 매수 점수 4/4점 완벽 조건
+    - 조기 수익 보호 트레일링 추가
     """
 
-    name = "KOSPI 200 비대칭 리스크 (상방개방·하방차단)"
+    name = "KOSPI 200 비대칭 리스크 v2 (손절강화·매수품질향상)"
 
     def __init__(
         self,
-        stop_loss_normal: float = -5.0,    # 황보장 손절 기준 (%) ← -3→-5%로 완화 (불필요한 조기 손절 방지)
-        stop_loss_bull:   float = -7.0,    # 상승장 손절 기준 (완화)
+        stop_loss_pct: float = -3.0,     # 손절 기준 (%) — -5 → -3으로 타이트하게
     ):
-        self.stop_loss_normal = stop_loss_normal
-        self.stop_loss_bull   = stop_loss_bull
+        self.stop_loss_pct = stop_loss_pct
         # 종목별 고점 추적 딕셔너리 (트레일링 스탑)
         self._peak: Dict[str, float] = {}
 
@@ -78,6 +74,9 @@ class Kospi200ComplexStrategy(BaseStrategy):
         df['ma20']  = df['close'].rolling(20).mean()
         df['ma60']  = df['close'].rolling(60).mean()
 
+        # 거래량 20일 평균 대비 비율
+        df['vol_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
+
         # 일평균 변동폭 20일 평균 (BB 여유폭 동적 계산용)
         df['avg_range'] = ((df['high'] - df['low']) / df['close'] * 100).rolling(20).mean()
 
@@ -104,29 +103,31 @@ class Kospi200ComplexStrategy(BaseStrategy):
             score += 1
         return score >= 2
 
-    # ─── 트레일링 스탑 기준 계산 ─────────────────────────────────
+    # ─── 트레일링 스탑 기준 계산 (v2: 조기 수익 보호 추가) ──────
 
     @staticmethod
     def _trailing_threshold(profit_rate: float) -> float:
         """
-        수익 단계별 트레일링 스탑 기준 (고점 대비 허용 하락폭)
-        수익이 클수록 여유를 더 줘서 큰 추세를 탈 수 있게 함
+        수익 단계별 트레일링 스탑 기준 (고점 대비 허용 하락폭) v2
 
-          0~3%:  손절 구간 (트레일링 미적용)
+          0~1%:  손절 구간 (트레일링 미적용)
+          1~3%:  고점 대비 -1.5% (조기 수익 보호 — 신규 추가)
           3~8%:  고점 대비 -2.0%
           8~15%: 고점 대비 -3.0%
-          15%+:  고점 대비 -5.0%
+          15%+:  고점 대비 -4.0% (기존 -5 → -4로 타이트하게)
         """
-        if profit_rate < 3.0:
+        if profit_rate < 1.0:
             return float('inf')   # 손절 구간 — 트레일링 미적용
+        elif profit_rate < 3.0:
+            return 1.5            # 신규: 소폭 수익도 보호
         elif profit_rate < 8.0:
             return 2.0
         elif profit_rate < 15.0:
             return 3.0
         else:
-            return 5.0            # 대세 상승 구간 — 여유 최대
+            return 4.0            # 대세 상승 구간 (기존 5 → 4로 강화)
 
-    # ─── 매수 판단 ──────────────────────────────────────────────
+    # ─── 매수 판단 (v2: 4/4점 완벽 조건) ────────────────────────
 
     def should_buy(self, stock_code: str, df: pd.DataFrame, current_price: int) -> bool:
         if len(df) < 26:
@@ -141,7 +142,7 @@ class Kospi200ComplexStrategy(BaseStrategy):
 
         bull = self._is_bull(df)
 
-        # 동적 BB 여유폭 (2026년 일평균 변동폭 반영)
+        # 동적 BB 여유폭 (일평균 변동폭 반영)
         avg_range = c.get('avg_range', 1.5)
         if pd.isna(avg_range):
             avg_range = 1.5
@@ -149,27 +150,37 @@ class Kospi200ComplexStrategy(BaseStrategy):
 
         # ① BB 하단 근접 (동적 여유폭)
         bb_ok = current_price <= c['bb_lower'] * (1 + bb_margin)
+
         # ② MACD 골든크로스
         macd_cross = p['macd'] < p['macd_signal'] and c['macd'] >= c['macd_signal']
+
         # ③ RSV 과매도 (≤30)
         rsv_ok = c['rsv'] <= 30
-        # ④ 상승장 추세 추종 (MA20 위 + MACD 크로스)
-        bull_follow = bull and c['close'] > c['ma20'] and macd_cross
+
+        # ④ 추세 조건: 상승장 추종 OR 거래량 급증(2배 이상)
+        vol_surge = (c.get('vol_ratio', 1.0) >= 2.0) if not pd.isna(c.get('vol_ratio', float('nan'))) else False
+        bull_follow = (bull and c['close'] > c['ma20'] and macd_cross) or (vol_surge and macd_cross)
 
         score = sum([bb_ok, macd_cross, rsv_ok, bull_follow])
 
-        # 파산 방지: 매수 신호 품질 향상 (2점 → 3점 이상으로 임계값 상향)
-        # 매수 횟수 줄이고 신호 품질 높여 손절 빈도 저하
-        if score >= 3:
+        # ★ v2 핵심 변경: 3점 → 4점 만점 모두 충족 시만 매수 (진입 품질 최대화)
+        if score >= 4:
             log.info(
                 f"[전략] 🟢 매수 - {stock_code} "
-                f"({'상승장' if bull else '황보장'} | 점수:{score}/4 | "
+                f"({'상승장' if bull else '횡보장'} | 점수:{score}/4 | "
                 f"BB:{bb_ok} MACD:{macd_cross} RSV:{c['rsv']:.0f} 추세:{bull_follow})"
             )
             return True
+
+        # 3점이면 조건 로그만 남기고 패스 (디버깅용)
+        if score == 3:
+            log.info(
+                f"[전략] ⬜ 매수 보류 - {stock_code} "
+                f"(점수:{score}/4 — 4점 미달 | BB:{bb_ok} MACD:{macd_cross} RSV:{c['rsv']:.0f} 추세:{bull_follow})"
+            )
         return False
 
-    # ─── 매도 판단 ──────────────────────────────────────────────
+    # ─── 매도 판단 (v2: 손절 -3% 고정, 트레일링 강화) ────────────
 
     def should_sell(
         self,
@@ -183,30 +194,24 @@ class Kospi200ComplexStrategy(BaseStrategy):
 
         profit_rate = (current_price - avg_price) / avg_price * 100
 
-        # 지표 계산 (ma20/ma60 포함) — _is_bull 호출 전에 먼저 수행
+        # 지표 계산
         if len(df) >= 26:
             df = self._add_indicators(df)
 
-        # 상승장 여부 (지표 계산 후 호출)
-        bull = self._is_bull(df) if len(df) >= 65 else False
-
         # ╔══════════════════════════════════════════════════════════╗
-        # ║  하방 차단 ①: 고정 손절 (원금 보호)                     ║
+        # ║  하방 차단 ①: 고정 손절 -3% (원금 보호 최우선)          ║
         # ╚══════════════════════════════════════════════════════════╝
-        stop = self.stop_loss_bull if bull else self.stop_loss_normal
-        if profit_rate <= stop:
+        if profit_rate <= self.stop_loss_pct:
             log.info(
                 f"[전략] 🔴 손절 - {stock_code} "
-                f"({profit_rate:.1f}% ≤ {stop}% | {'상승장' if bull else '횡보장'})"
+                f"({profit_rate:.1f}% ≤ {self.stop_loss_pct}%)"
             )
             self._peak.pop(stock_code, None)
             return True
 
         # ╔══════════════════════════════════════════════════════════╗
-        # ║  하방 차단 ②: 트레일링 스탑 (이익 보호)                  ║
-        # ║  수익 단계별 허용 하락폭 → 상방은 무한 개방 유지          ║
+        # ║  하방 차단 ②: 트레일링 스탑 v2 (조기 수익 보호 강화)    ║
         # ╚══════════════════════════════════════════════════════════╝
-        # 고점 갱신
         peak = self._peak.get(stock_code, float(current_price))
         if current_price > peak:
             peak = float(current_price)
@@ -217,7 +222,7 @@ class Kospi200ComplexStrategy(BaseStrategy):
 
         if drop_from_peak >= ts_threshold:
             log.info(
-                f"[전략] 📉 트레일링 스탑 - {stock_code} "
+                f"[전략] 📉 트레일링 스탑 v2 - {stock_code} "
                 f"(수익 {profit_rate:.1f}% | 고점 {peak:,.0f}원 → "
                 f"-{drop_from_peak:.1f}% | 기준 -{ts_threshold:.1f}%)"
             )
@@ -225,27 +230,22 @@ class Kospi200ComplexStrategy(BaseStrategy):
             return True
 
         # ╔══════════════════════════════════════════════════════════╗
-        # ║  지표 매도 (상방 개방 원칙 — 3개 조건 모두 충족 시만)    ║
-        # ║  단일 조건(BB상단 or MACD크로스)으로 섣불리 매도 금지    ║
+        # ║  지표 매도: 횡보장 2개 / 상승장 3개 조건 충족 시 청산   ║
         # ╚══════════════════════════════════════════════════════════╝
-        if len(df) < 26:
-            return False
-
-        # 지표 컬럼이 없으면(데이터 부족) 스킵
-        if 'bb_upper' not in df.columns:
+        if len(df) < 26 or 'bb_upper' not in df.columns:
             return False
 
         c = df.iloc[-1]
         p = df.iloc[-2]
 
-
         bb_upper_touch = current_price >= c['bb_upper']
         macd_dead      = p['macd'] > p['macd_signal'] and c['macd'] <= c['macd_signal']
         rsv_overbought = c['rsv'] >= 70
 
+        bull = self._is_bull(df) if len(df) >= 65 else False
+
         if bull:
-            # 상승장: 3개 조건 모두 + 목표 10% 이상 수익 달성 시만 청산
-            # → 상승 추세에서 섣부른 청산 최대한 방지
+            # 상승장: 3개 모두 + 수익 10% 이상
             if bb_upper_touch and macd_dead and rsv_overbought and profit_rate >= 10.0:
                 log.info(
                     f"[전략] 📊 상승장 지표 청산 - {stock_code} "
@@ -254,7 +254,7 @@ class Kospi200ComplexStrategy(BaseStrategy):
                 self._peak.pop(stock_code, None)
                 return True
         else:
-            # 횡보장: 2개 이상 조건 충족 시 청산
+            # 횡보장: 2개 이상 충족
             signal_count = sum([bb_upper_touch, macd_dead, rsv_overbought])
             if signal_count >= 2:
                 reason = "+".join(filter(None, [
