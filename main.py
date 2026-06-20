@@ -17,7 +17,7 @@ import argparse
 import schedule
 import threading
 from datetime import datetime, date as _date
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 
 # 리눅스(오라클 클라우드 등) 환경 타임존 KST 동기화
 if sys.platform != "win32":
@@ -163,7 +163,7 @@ class AutoTrader:
         max_normal_invest = max(balance["cash"], 0) * 0.5
 
         # 1) 보유 종목: 급락 물타기 + 매도 체크
-        sold_codes: set[str] = set()
+        sold_codes: Set[str] = set()
         try:
             holdings = get_holdings()
             for h in holdings:

@@ -12,6 +12,7 @@
 import time
 import requests
 from datetime import datetime
+from typing import List, Optional
 from utils.logger import log
 
 
@@ -294,7 +295,7 @@ def notify_daily_report(balance: dict, holdings: list, session_label: str = "장
         log.info(f"[TELEGRAM] [{session_label} 종료] 일일 마감 리포트 전송 완료")
 
 
-def notify_trade_log_report(trade_log: list[dict]):
+def notify_trade_log_report(trade_log: List[dict]):
     """
     당일 매매내역 리포트 전송.
     - trade_log: AutoTrader.trade_log 리스트
@@ -439,7 +440,7 @@ def check_commands(start_offset: int) -> tuple:
             return [], start_offset
 
         updates = resp.json().get("result", [])
-        commands: list[str] = []
+        commands: List[str] = []
         new_offset = start_offset
         for upd in updates:
             new_offset = upd["update_id"]
@@ -495,7 +496,7 @@ def notify_status(is_running: bool, changed: bool = True):
 def notify_status_detail(
     is_running: bool,
     is_trading_day: bool,
-    session: str | None,
+    session: Optional[str],
     is_paused: bool,
     balance: dict = None,
 ):

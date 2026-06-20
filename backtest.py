@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pandas as pd
 import FinanceDataReader as fdr
 from datetime import date
+from typing import Dict
 
 # 전략 임포트
 from strategy.complex import Kospi200ComplexStrategy
@@ -63,7 +64,7 @@ print(f"  전략: {strategy.name}")
 print(f"  초기자금: {INITIAL_CASH:,}원  |  종목당 매수: {BUY_AMOUNT:,}원")
 print(f"{'='*60}\n")
 
-price_data: dict[str, pd.DataFrame] = {}
+price_data: Dict[str, pd.DataFrame] = {}
 for code, name in SAMPLE_CODES:
     try:
         df = fdr.DataReader(code, START, END)
