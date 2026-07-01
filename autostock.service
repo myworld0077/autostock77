@@ -1,0 +1,26 @@
+[Unit]
+Description=AutoStock 자동매매 시스템 (래리 윌리엄스 변동성 돌파)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=diwhdals
+WorkingDirectory=/home/diwhdals/autostock77
+ExecStart=/usr/bin/python3 /home/diwhdals/autostock77/main.py
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 환경 설정
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Seoul
+EnvironmentFile=/home/diwhdals/autostock77/.env
+
+# 로그 출력
+StandardOutput=append:/home/diwhdals/autostock77/logs/autostock.log
+StandardError=append:/home/diwhdals/autostock77/logs/autostock_error.log
+
+[Install]
+WantedBy=multi-user.target
