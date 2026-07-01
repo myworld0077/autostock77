@@ -6,8 +6,9 @@ AutoStock - 주식 자동매매 메인 엔진
     ※ 모의투자는 정규장(09:00~15:30)만 지원
 
 사용법:
-    python main.py              # 복합 전략으로 실행
-    python main.py --strategy volatility  # 변동성 돌파 전략
+    python main.py              # 래리 윌리엄스 변동성 돌파 전략 (기본)
+    python main.py --strategy complex     # KOSPI200 복합 전략
+    python main.py --strategy volatility  # 래리 윌리엄스 변동성 돌파 전략
     python main.py --dashboard  # 웹 대시보드만 실행
 """
 import sys
@@ -44,7 +45,7 @@ from utils import notifier
 from core.keep_alive import prevent_sleep, allow_sleep
 
 
-# ─── 감시 종목 리스트 (ma / volatility 전략용) ─────────────────────
+# ─── 감시 종목 리스트 (ma 전략 fallback용) ─────────────────────
 WATCH_LIST = [
     "005930",   # 삼성전자
     "000660",   # SK하이닉스
@@ -56,6 +57,31 @@ WATCH_LIST = [
     "068270",   # 셀트리온
     "207940",   # 삼성바이오로직스
     "028260",   # 삼성물산
+]
+
+# ─── 래리 윌리엄스 변동성 돌파 전략 감시 종목 (코스피 대형주 + 우량 코스닥) ───
+# 화·수 매수 / 목 청산 → 유동성 높은 대형주 위주 선정
+WATCH_LIST_LW = [
+    "005930",   # 삼성전자
+    "000660",   # SK하이닉스
+    "035420",   # NAVER
+    "005380",   # 현대차
+    "000270",   # 기아차
+    "051910",   # LG화학
+    "068270",   # 셀트리온
+    "207940",   # 삼성바이오로직스
+    "012330",   # 현대모비스
+    "096770",   # SK이노베이션
+    "034730",   # SK
+    "003550",   # LG
+    "015760",   # 한국전력
+    "086790",   # 하나금융지주
+    "105560",   # KB금융
+    "055550",   # 신한지주
+    "032830",   # 삼성생명
+    "066570",   # LG전자
+    "009150",   # 삼성전기
+    "018880",   # 한온시스템
 ]
 
 
@@ -376,8 +402,8 @@ class AutoTrader:
 def main():
     prevent_sleep()
     parser = argparse.ArgumentParser(description="AutoStock 주식 자동매매")
-    parser.add_argument("--strategy", choices=["ma", "volatility", "complex"], default="complex",
-                        help="매매 전략 (ma: 이동평균, volatility: 변동성 돌파, complex: 코스피200 복합)")
+    parser.add_argument("--strategy", choices=["ma", "volatility", "complex"], default="volatility",
+                        help="매매 전략 (volatility: 래리윌리엄스 변동성돌파[기본], ma: 이동평균, complex: 코스피200 복합)")
     parser.add_argument("--interval", type=int, default=10,
                         help="매매 체크 주기 (분)")
     parser.add_argument("--once", action="store_true",
@@ -422,8 +448,19 @@ def main():
         kosdaq_watch_list = get_kosdaq150_energy_semi()
         log.info(f"  코스닥 에너지·반도체 {len(kosdaq_watch_list)}종목 추가 감시 (투자한도: 총자산 10%)")
     elif args.strategy == "volatility":
-        strategy = VolatilityBreakoutStrategy(k=0.5)
-        watch_list = WATCH_LIST
+        # ★ 기본 전략: 래리 윌리엄스 변동성 돌파 (LW-VBS v3)
+        strategy = VolatilityBreakoutStrategy(
+            k=0.5,                  # 변동성 계수 50%
+            stop_loss_pct=-2.5,     # 손절 -2.5%
+            profit_take_pct=5.0,    # 즉시 익절 +5%
+            range_ratio_min=0.8,    # 전일 변동폭 80% 이상
+            vol_ratio_min=1.5,      # 전일 거래량 1.5배 이상
+            max_entry_gap_pct=4.0,  # 목표가 시가 괴리 최대 4%
+            use_day_filter=True,    # 화·수 매수 / 목 청산
+        )
+        watch_list = WATCH_LIST_LW
+        log.info(f"  [LW-VBS] 래리 윌리엄스 변동성 돌파 전략 | 감시종목: {len(watch_list)}개")
+        log.info("  화·수요일 매수 → 목요일 강제 청산 | 손절 -2.5% | 즉시 익절 +5%")
     else:
         strategy = MovingAverageCrossStrategy(short_window=5, long_window=20)
         watch_list = WATCH_LIST
@@ -634,6 +671,10 @@ def main():
                         log.info(f"[UNIVERSE] 새 영업일 유니버스 자동 갱신 완료: "
                                  f"KOSPI {len(trader.watch_list)}종목 + "
                                  f"KOSDAQ {len(trader.kosdaq_watch_list)}종목")
+                    elif args.strategy == "volatility":
+                        # LW 전략: 고정 종목 리스트 사용 (매일 동일)
+                        trader.watch_list = WATCH_LIST_LW
+                        log.info(f"[UNIVERSE] LW 변동성돌파 감시종목 유지: {len(WATCH_LIST_LW)}개")
 
             # ─── 08:30 장전 리포트 주 트리거 (루프 시각 체크 + 당일 플래그) ──────────
             # schedule.at()은 시작 시각이 지나면 다음 날 실행하므로 단독 의존 금지
