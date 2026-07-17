@@ -22,26 +22,27 @@ def _get_cfg():
     return settings.TELEGRAM_TOKEN, settings.TELEGRAM_CHAT_ID
 
 
-def send_message(text: str, parse_mode: str = "HTML") -> bool:
+def send_message(text: str, parse_mode: str = "HTML", force: bool = False) -> bool:
     """텔레그램 메시지 전송. 성공 시 True 반환 (휴장일 발송 원천 차단 적용)."""
-    # ─── 휴장일 발송 원천 차단 2중 안전 장치 ───
-    try:
-        from core.calendar import is_trading_day, verify_market_open_strict
-        
-        # 1차 검증: 주말, 공휴일, 연말 휴장일, KIS API 판정 기준 휴장일인지 확인
-        if not is_trading_day():
-            log.warning(f"[TELEGRAM] 🚫 휴장일 전송 차단 (is_trading_day=False) | 메시지 요약: {text[:40].strip()}...")
-            return False
+    # ─── 휴장일 발송 원천 차단 2중 안전 장치 (force=True인 경우 통과) ───
+    if not force:
+        try:
+            from core.calendar import is_trading_day, verify_market_open_strict
             
-        # 2차 검증: KIS API 실패 시 보수적으로 영업일 처리된 경우, 실제 현재가 조회를 통한 최종 교차 검증
-        if not verify_market_open_strict():
-            log.warning(f"[TELEGRAM] 🚫 2중 실시간 검증 실패로 전송 차단 | 메시지 요약: {text[:40].strip()}...")
+            # 1차 검증: 주말, 공휴일, 연말 휴장일, KIS API 판정 기준 휴장일인지 확인
+            if not is_trading_day():
+                log.warning(f"[TELEGRAM] 🚫 휴장일 전송 차단 (is_trading_day=False) | 메시지 요약: {text[:40].strip()}...")
+                return False
+                
+            # 2차 검증: KIS API 실패 시 보수적으로 영업일 처리된 경우, 실제 현재가 조회를 통한 최종 교차 검증
+            if not verify_market_open_strict():
+                log.warning(f"[TELEGRAM] 🚫 2중 실시간 검증 실패로 전송 차단 | 메시지 요약: {text[:40].strip()}...")
+                return False
+                
+        except Exception as e:
+            # 혹시 모를 모듈 임포트 에러나 조회 예외 시 안전을 위해 차단 처리
+            log.warning(f"[TELEGRAM] 🚫 영업일 검증 중 오류 발생으로 전송 차단: {e} | 메시지 요약: {text[:40].strip()}...")
             return False
-            
-    except Exception as e:
-        # 혹시 모를 모듈 임포트 에러나 조회 예외 시 안전을 위해 차단 처리
-        log.warning(f"[TELEGRAM] 🚫 영업일 검증 중 오류 발생으로 전송 차단: {e} | 메시지 요약: {text[:40].strip()}...")
-        return False
 
     token, chat_id = _get_cfg()
     if not token or not chat_id:
@@ -82,7 +83,7 @@ def notify_start(mode: str, strategy: str, watch_count: int):
         f"감시종목: {watch_count}개\n"
         f"시각: {now_str}"
     )
-    if send_message(msg):
+    if send_message(msg, force=True):
         log.info("[TELEGRAM] 프로그램 시작 알림 전송")
 
 
@@ -95,7 +96,7 @@ def notify_stop(reason: str = "정상 종료"):
         f"사유: {reason}\n"
         f"시각: {now_str}"
     )
-    if send_message(msg):
+    if send_message(msg, force=True):
         log.info("[TELEGRAM] 프로그램 종료 알림 전송")
 
 
@@ -108,7 +109,7 @@ def notify_error(error_msg: str):
         f"{error_msg}\n"
         f"시각: {now_str}"
     )
-    send_message(msg)
+    send_message(msg, force=True)
 
 
 def notify_auth_error(mode: str, error_code: str = ""):
@@ -129,7 +130,7 @@ def notify_auth_error(mode: str, error_code: str = ""):
         f"   {key_var}=새키\n"
         f"   {secret_var}=새시크릿"
     )
-    send_message(msg)
+    send_message(msg, force=True)
 
 
 # ── 급변동 / 긴급 하락 알림 ──────────────────────────────────────────
@@ -488,7 +489,7 @@ def notify_status(is_running: bool, changed: bool = True):
         f"{cmd_hint}\n"
         f"⏰ {now_str}"
     )
-    send_message(msg)
+    send_message(msg, force=True)
     state_str = "가동" if is_running else "중지"
     log.info(f"[TELEGRAM] 상태 응답 전송: {state_str} ({'변경' if changed else '유지'})")
 
@@ -545,7 +546,7 @@ def notify_status_detail(
         f"⏸️ 중지: <code>0</code>  ▶️ 재개: <code>1</code>  🔍 조회: <code>2</code>\n"
         f"⏰ {now_str}"
     )
-    send_message(msg)
+    send_message(msg, force=True)
     log.info(f"[TELEGRAM] 상태 상세 조회 응답 전송 (가동={is_running})")
 
 
@@ -644,7 +645,7 @@ def request_sell_confirmation(
         f"❌ <b>'취소'</b> 또는 <b>'아니오'</b> → 매도 취소\n"
         f"⏱️ {timeout}초 내 응답 없으면 <b>자동 매도</b>"
     )
-    send_message(msg)
+    send_message(msg, force=True)
     log.info(f"[TELEGRAM] 매도 확인 요청 전송 → {name}({stock_code}) / {profit_rate:+.1f}%")
 
     approve_words = ['매도', '예', '익절', '손절', 'y', 'yes', 'sell', '1']
@@ -654,15 +655,15 @@ def request_sell_confirmation(
 
     if result == 'approve':
         log.info(f"[TELEGRAM] 매도 승인 → {name}({stock_code}) 매도 실행")
-        send_message(f"✅ <b>매도 승인</b>\n{name} ({stock_code}) 매도를 실행합니다.")
+        send_message(f"✅ <b>매도 승인</b>\n{name} ({stock_code}) 매도를 실행합니다.", force=True)
         return True
     elif result == 'reject':
         log.info(f"[TELEGRAM] 매도 취소 → {name}({stock_code}) 매도 스킵")
-        send_message(f"❌ <b>매도 취소</b>\n{name} ({stock_code}) 매도를 취소했습니다.")
+        send_message(f"❌ <b>매도 취소</b>\n{name} ({stock_code}) 매도를 취소했습니다.", force=True)
         return False
     else:  # timeout → 자동 매도
         log.info(f"[TELEGRAM] 매도 확인 시간 초과 → {name}({stock_code}) 자동 매도 실행")
-        send_message(f"⏰ <b>시간 초과 → 자동 매도</b>\n{name} ({stock_code}) 매도를 실행합니다.")
+        send_message(f"⏰ <b>시간 초과 → 자동 매도</b>\n{name} ({stock_code}) 매도를 실행합니다.", force=True)
         return True
 
 
@@ -703,7 +704,7 @@ def request_real_trading_approval(timeout_seconds: int = 120) -> bool:
             f"코드 없이 Enter → 취소\n"
             f"유효시간: {timeout_seconds}초"
         )
-        send_message(msg)
+        send_message(msg, force=True)
         log.warning(f"[TELEGRAM] 실전투자 승인 코드를 전송했습니다. ({timeout_seconds}초 내 입력)")
         prompt = f"텔레그램으로 받은 6자리 승인 코드를 입력하세요 ({timeout_seconds}초): "
     else:
@@ -723,11 +724,11 @@ def request_real_trading_approval(timeout_seconds: int = 120) -> bool:
         # 승인 코드 검증
         if user_input.strip() == approval_code:
             log.info("[REAL] 승인 코드 일치 → 실전투자를 시작합니다.")
-            send_message("✅ <b>실전투자 승인 완료</b>\nAutoStock 실전투자를 시작합니다.")
+            send_message("✅ <b>실전투자 승인 완료</b>\nAutoStock 실전투자를 시작합니다.", force=True)
             return True
         else:
             log.warning("[REAL] 승인 코드 불일치 — 실전투자를 취소합니다.")
-            send_message("❌ <b>실전투자 취소</b>\n승인 코드가 일치하지 않습니다.")
+            send_message("❌ <b>실전투자 취소</b>\n승인 코드가 일치하지 않습니다.", force=True)
             return False
     else:
         # 텔레그램 없는 경우 Y/N 확인

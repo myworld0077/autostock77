@@ -37,7 +37,9 @@ from strategy.base import BaseStrategy
 from strategy.ma_cross import MovingAverageCrossStrategy
 from strategy.volatility import VolatilityBreakoutStrategy
 from strategy.complex import Kospi200ComplexStrategy
+from strategy.etf_volatility import EtfVolatilityStrategy
 from core.universe import get_kis_kospi200_top150, get_kosdaq150_energy_semi
+from core.etf_universe import get_etf_watchlist, get_etf_name, is_leverage, is_inverse, ALL_LEVERAGE_ETF, ALL_INVERSE_ETF
 from core.watchlist_manager import get_dynamic_watchlist
 from core.calendar import is_trading_day, trading_day_status, next_trading_day, verify_market_open_strict
 from utils.logger import log
@@ -92,6 +94,10 @@ EMERGENCY_DROP   = -5.0   # 긴급 하락 기준 (%)
 SURGE_COOLDOWN_S = 1800   # 급변동 알림 쿨다운 (초, 30분)
 DAILY_LOSS_LIMIT = -5.0   # 일일 손실 한도 (%) — 초과 시 당일 매매 자동 중단
 
+# ─── ETF 전략 전용 매수 한도 ────────────────────────────
+ETF_LEV_CASH_RATIO  = 0.20  # 레버리지 ETF 매수 한도: 현금의 20%
+ETF_INV_CASH_RATIO  = 0.10  # 인버스 ETF  매수 한도: 현금의 10% (헤지 비중)
+
 
 # ─── 초기 투자금 추적 ──────────────────────────────────────────
 import json as _json
@@ -121,11 +127,15 @@ class AutoTrader:
     KOSDAQ_RATIO = 0.10  # 코스닥 에너지·반도체 투자 비중 한도 (총자산의 10%)
 
     def __init__(self, strategy: BaseStrategy, watch_list: List[str],
-                 kosdaq_watch_list: Optional[List[str]] = None):
+                 kosdaq_watch_list: Optional[List[str]] = None,
+                 etf_leverage_list: Optional[List[str]] = None,
+                 etf_inverse_list: Optional[List[str]] = None):
         self.strategy = strategy
         self.universe_watch_list = watch_list
         self.watch_list = watch_list
         self.kosdaq_watch_list = kosdaq_watch_list or []
+        self.etf_leverage_list = etf_leverage_list or []   # 레버리지 ETF 감시 목록
+        self.etf_inverse_list  = etf_inverse_list  or []   # 인버스 ETF 감시 목록
         self.trade_log: List[dict] = []              # 거래 이력
         self._price_cache: Dict[str, int] = {}       # 이전 사이클 가격 (급변동 감지용)
         self._emergency_alerted: Set[str] = set()    # 긴급 알림 발송 완료 종목
@@ -393,17 +403,186 @@ class AutoTrader:
                         log.error(f"코스닥 매수 오류 ({code}): {e}")
                     time.sleep(0.5)
 
+        # 4) ETF 레버리지/인버스 매수 체크 (ETF 전략일 때만 실행)
+        if isinstance(self.strategy, EtfVolatilityStrategy) and (
+            self.etf_leverage_list or self.etf_inverse_list
+        ):
+            self._run_etf_cycle(balance, held_codes, sold_codes, is_paused)
+
         # 사이클 완료
         log.info("✅ 사이클 완료\n")
         # ⚠️ notify_profit_report는 매 사이클 자동 전송 안 함 (중복 전송 방지)
         #    → 08:30 장전 / 15:35 일일 마감 리포트 스케줄로만 전송
 
 
+    # ─────────────────────────────────────────────────────────────────────
+    #  ETF 전략 전용 사이클
+    # ─────────────────────────────────────────────────────────────────────
+    def _run_etf_cycle(
+        self,
+        balance: dict,
+        held_codes: Set[str],
+        sold_codes: Set[str],
+        is_paused: bool,
+    ):
+        """
+        ETF 레버리지/인버스 매수 체크
+
+        매수 한도:
+          - 레버리지 ETF: 현재 예수금의 20% 이내
+          - 인버스 ETF  : 현재 예수금의 10% 이내
+        """
+        etf_strategy: EtfVolatilityStrategy = self.strategy  # type: ignore
+        cash = max(balance["cash"], 0)
+
+        # ── 레버리지 ETF 보유 평가액 합산 ─────────────────────────────────
+        try:
+            holdings_now = get_holdings()
+        except Exception as _e:
+            log.warning(f"[ETF] 보유종목 재조회 실패: {_e}")
+            return
+
+        lev_held_eval = sum(
+            h["qty"] * h["cur_price"]
+            for h in holdings_now
+            if h["code"] in self.etf_leverage_list and h["code"] not in sold_codes
+        )
+        inv_held_eval = sum(
+            h["qty"] * h["cur_price"]
+            for h in holdings_now
+            if h["code"] in self.etf_inverse_list and h["code"] not in sold_codes
+        )
+
+        lev_limit     = cash * ETF_LEV_CASH_RATIO
+        inv_limit     = cash * ETF_INV_CASH_RATIO
+        lev_available = lev_limit - lev_held_eval
+        inv_available = inv_limit - inv_held_eval
+
+        log.info(
+            f"[ETF] 레버리지 가용: {lev_available:,.0f}원 (한도 {lev_limit:,.0f}) | "
+            f"인버스 가용: {inv_available:,.0f}원 (한도 {inv_limit:,.0f})"
+        )
+
+        # 현재 보유 종목 집합 (페어 동시보유 방지 전달용)
+        current_held = {h["code"] for h in holdings_now} - sold_codes
+
+        # ── 레버리지 ETF 매수 체크 ───────────────────────────────────────
+        if lev_available > 0 and len(held_codes) < settings.MAX_STOCKS:
+            for code in self.etf_leverage_list:
+                if code in held_codes or code in self._sold_today:
+                    continue
+                if lev_available <= 0:
+                    break
+                if len(held_codes) >= settings.MAX_STOCKS:
+                    break
+                try:
+                    price_info = get_current_price(code)
+                    cur_price  = price_info["price"]
+                    name       = price_info.get("name") or get_etf_name(code)
+
+                    self._check_surge(code, name, cur_price, is_held=False)
+
+                    df = get_daily_ohlcv(code)
+                    # ETF 전략의 should_buy에 held_codes 전달 (페어 동시보유 방지)
+                    if etf_strategy.should_buy(code, df, cur_price, held_codes=current_held):
+                        if is_paused:
+                            log.info(f"  ⏸️ 일시중지 - 레버리지ETF 매수 보류: {name}({code})")
+                        elif self._daily_loss_halted:
+                            log.warning(f"  ⛔ 일일손실한도 — 레버리지ETF 신규매수 스킵: {name}({code})")
+                        else:
+                            buy_amt = min(lev_available, balance["cash"], settings.BUY_AMOUNT)
+                            qty = int(buy_amt // cur_price)
+                            if qty <= 0:
+                                log.info(f"  {name}({code}) — 매수금액 부족")
+                                continue
+                            result = buy_market(code, qty)
+                            if result["success"]:
+                                cost = qty * cur_price
+                                lev_available         -= cost
+                                balance["total_eval"] += cost
+                                balance["cash"]       -= cost
+                                held_codes.add(code)
+                                current_held.add(code)
+                                notifier.notify_buy(code, name, qty, cur_price)
+                                self.trade_log.append({
+                                    "time": datetime.now().isoformat(),
+                                    "side": "buy",
+                                    "code": code,
+                                    "name": name,
+                                    "qty":  qty,
+                                    "price": cur_price,
+                                    "category": "ETF_LEVERAGE",
+                                })
+                except Exception as _e:
+                    log.error(f"[ETF] 레버리지 매수 오류 ({code}): {_e}")
+                time.sleep(0.5)
+        else:
+            if lev_available <= 0:
+                log.info(f"[ETF] 레버리지 한도 소진 (보유: {lev_held_eval:,.0f} / 한도: {lev_limit:,.0f})")
+
+        # ── 인버스 ETF 매수 체크 (헤지) ─────────────────────────────────
+        if inv_available > 0 and len(held_codes) < settings.MAX_STOCKS:
+            for code in self.etf_inverse_list:
+                if code in held_codes or code in self._sold_today:
+                    continue
+                if inv_available <= 0:
+                    break
+                if len(held_codes) >= settings.MAX_STOCKS:
+                    break
+                try:
+                    price_info = get_current_price(code)
+                    cur_price  = price_info["price"]
+                    name       = price_info.get("name") or get_etf_name(code)
+
+                    self._check_surge(code, name, cur_price, is_held=False)
+
+                    df = get_daily_ohlcv(code)
+                    if etf_strategy.should_buy(code, df, cur_price, held_codes=current_held):
+                        if is_paused:
+                            log.info(f"  ⏸️ 일시중지 - 인버스ETF 매수 보류: {name}({code})")
+                        # ⚠️ 인버스 ETF는 일일손실한도 초과 시에도 헤지 목적으로 매수 허용
+                        else:
+                            buy_amt = min(inv_available, balance["cash"], settings.BUY_AMOUNT)
+                            qty = int(buy_amt // cur_price)
+                            if qty <= 0:
+                                log.info(f"  {name}({code}) — 매수금액 부족")
+                                continue
+                            result = buy_market(code, qty)
+                            if result["success"]:
+                                cost = qty * cur_price
+                                inv_available         -= cost
+                                balance["total_eval"] += cost
+                                balance["cash"]       -= cost
+                                held_codes.add(code)
+                                current_held.add(code)
+                                notifier.notify_buy(code, name, qty, cur_price)
+                                self.trade_log.append({
+                                    "time": datetime.now().isoformat(),
+                                    "side": "buy",
+                                    "code": code,
+                                    "name": name,
+                                    "qty":  qty,
+                                    "price": cur_price,
+                                    "category": "ETF_INVERSE",
+                                })
+                except Exception as _e:
+                    log.error(f"[ETF] 인버스 매수 오류 ({code}): {_e}")
+                time.sleep(0.5)
+        else:
+            if inv_available <= 0:
+                log.info(f"[ETF] 인버스 한도 소진 (보유: {inv_held_eval:,.0f} / 한도: {inv_limit:,.0f})")
+
+        # 국면 현황 로그
+        regime_summary = etf_strategy.get_regime_summary()
+        if regime_summary:
+            log.info(f"[ETF국면현황]\n{regime_summary}")
+
+
 def main():
     prevent_sleep()
     parser = argparse.ArgumentParser(description="AutoStock 주식 자동매매")
-    parser.add_argument("--strategy", choices=["ma", "volatility", "complex"], default="volatility",
-                        help="매매 전략 (volatility: 래리윌리엄스 변동성돌파[기본], ma: 이동평균, complex: 코스피200 복합)")
+    parser.add_argument("--strategy", choices=["ma", "volatility", "complex", "etf"], default="volatility",
+                        help="매매 전략 (volatility: 래리윌리엄스[기본], ma: 이동평균, complex: 코스피200복합, etf: 레버리지/인버스ETF변동성)")
     parser.add_argument("--interval", type=int, default=10,
                         help="매매 체크 주기 (분)")
     parser.add_argument("--once", action="store_true",
@@ -439,7 +618,9 @@ def main():
         log.info("[Paper] 모의투자 모드로 실행합니다.")
 
     # 전략 및 감시 종목 선택
-    kosdaq_watch_list = []
+    kosdaq_watch_list  = []
+    etf_leverage_list  = []
+    etf_inverse_list   = []
     if args.strategy == "complex":
         strategy = Kospi200ComplexStrategy()
         watch_list = get_kis_kospi200_top150()
@@ -461,6 +642,28 @@ def main():
         watch_list = WATCH_LIST_LW
         log.info(f"  [LW-VBS] 래리 윌리엄스 변동성 돌파 전략 | 감시종목: {len(watch_list)}개")
         log.info("  화·수요일 매수 → 목요일 강제 청산 | 손절 -2.5% | 즉시 익절 +5%")
+    elif args.strategy == "etf":
+        # ★ ETF 변동성 대응 전략: 나스닥 반도체 + 삼성전자 레버리지/인버스
+        strategy = EtfVolatilityStrategy(
+            stop_loss_pct=-3.0,    # 손절 -3% (레버리지 2배 실질 -6% 방어)
+            profit_take_pct=6.0,   # 즉시 익절 +6%
+            max_hold_days=3,       # 최대 3거래일 보유 (금요일 강제 청산 별도)
+        )
+        watch_list = []            # ETF 전략은 일반 종목 감시 없음
+        etf_leverage_list, etf_inverse_list = get_etf_watchlist(
+            use_nasdaq_semi=True,
+            use_samsung=True,
+            include_inverse=True,
+        )
+        log.info(
+            f"  [ETF] 변동성 대응 전략 | "
+            f"레버리지 {len(etf_leverage_list)}종목 + 인버스(헤지) {len(etf_inverse_list)}종목"
+        )
+        log.info(
+            f"  레버리지 한도: 현금 {ETF_LEV_CASH_RATIO*100:.0f}% | "
+            f"인버스 한도: 현금 {ETF_INV_CASH_RATIO*100:.0f}%"
+        )
+        log.info("  손절 -3% | 익절 +6% | 금요일 강제청산 | 레버리지+인버스 동시보유 금지")
     else:
         strategy = MovingAverageCrossStrategy(short_window=5, long_window=20)
         watch_list = WATCH_LIST
@@ -469,7 +672,9 @@ def main():
     log.info("=" * 50)
     log.info("  AutoStock 자동매매 시작")
     log.info(f"  모드: {'[Paper] 모의투자' if settings.is_paper else '[Real] 실전투자'}")
-    if len(watch_list) > settings.MAX_STOCKS:
+    if args.strategy == "etf":
+        log.info(f"  감시 종목: 레버리지ETF {len(etf_leverage_list)}개 + 인버스ETF {len(etf_inverse_list)}개")
+    elif len(watch_list) > settings.MAX_STOCKS:
         log.info(f"  감시 종목: KOSPI 유니버스 {len(watch_list)}개 중 매 사이클 최적 {settings.MAX_STOCKS}개 동적 선정")
         log.info(f"             + KOSDAQ {len(kosdaq_watch_list)}개")
     else:
@@ -482,8 +687,13 @@ def main():
     # 텔레그램: 프로그램 시작 알림
     notifier.notify_start(mode_label, strategy.name, len(watch_list) + len(kosdaq_watch_list))
 
-    trader = AutoTrader(strategy=strategy, watch_list=watch_list,
-                        kosdaq_watch_list=kosdaq_watch_list)
+    trader = AutoTrader(
+        strategy=strategy,
+        watch_list=watch_list,
+        kosdaq_watch_list=kosdaq_watch_list,
+        etf_leverage_list=etf_leverage_list,
+        etf_inverse_list=etf_inverse_list,
+    )
 
     # ─── 초기 투자금 기록 (최초 1회만) ─────────────────────────────────
     _existing_cap = _load_initial_capital()
@@ -675,6 +885,16 @@ def main():
                         # LW 전략: 고정 종목 리스트 사용 (매일 동일)
                         trader.watch_list = WATCH_LIST_LW
                         log.info(f"[UNIVERSE] LW 변동성돌파 감시종목 유지: {len(WATCH_LIST_LW)}개")
+                    elif args.strategy == "etf":
+                        # ETF 전략: 고정 ETF 리스트 사용 (매일 동일)
+                        trader.etf_leverage_list, trader.etf_inverse_list = get_etf_watchlist(
+                            use_nasdaq_semi=True, use_samsung=True, include_inverse=True
+                        )
+                        log.info(
+                            f"[UNIVERSE] ETF 감시종목 유지: "
+                            f"레버리지 {len(trader.etf_leverage_list)}개 "
+                            f"+ 인버스 {len(trader.etf_inverse_list)}개"
+                        )
 
             # ─── 08:30 장전 리포트 주 트리거 (루프 시각 체크 + 당일 플래그) ──────────
             # schedule.at()은 시작 시각이 지나면 다음 날 실행하므로 단독 의존 금지
