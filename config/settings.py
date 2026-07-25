@@ -13,7 +13,7 @@ load_dotenv(override=True)
 class Settings:
     """환경 변수 기반 설정 관리 — 모드에 따라 키/URL/계좌 자동 선택"""
 
-    TRADE_MODE: str = os.getenv("TRADE_MODE", "paper").lower().strip()
+    TRADE_MODE: str = "real"  # 실전투자 전용으로 고정 (모의투자 차단)
 
     # ── 모의투자 자격증명 ──────────────────────────────────────
     _PAPER_APP_KEY: str = os.getenv("PAPER_APP_KEY", "")
