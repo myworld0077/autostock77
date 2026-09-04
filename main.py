@@ -35,9 +35,11 @@ from core.account import get_balance, get_holdings
 from core.order import buy_market, sell_market
 from strategy.base import BaseStrategy
 from strategy.ma_cross import MovingAverageCrossStrategy
-from strategy.volatility import VolatilityBreakoutStrategy
 from strategy.complex import Kospi200ComplexStrategy
 from strategy.etf_volatility import EtfVolatilityStrategy
+from strategy.bull_trend import BullTrendStrategy
+from strategy.defensive_bear import DefensiveBearStrategy
+from core.market_regime import MarketRegime, detect_regime, get_regime_label, COMMAND_TO_REGIME
 from core.universe import get_kis_kospi200_top150, get_kosdaq150_energy_semi
 from core.etf_universe import get_etf_watchlist, get_etf_name, is_leverage, is_inverse, ALL_LEVERAGE_ETF, ALL_INVERSE_ETF
 from core.watchlist_manager import get_dynamic_watchlist
@@ -581,8 +583,12 @@ class AutoTrader:
 def main():
     prevent_sleep()
     parser = argparse.ArgumentParser(description="AutoStock 주식 자동매매")
-    parser.add_argument("--strategy", choices=["ma", "volatility", "complex", "etf"], default="volatility",
-                        help="매매 전략 (volatility: 래리윌리엄스[기본], ma: 이동평균, complex: 코스피200복합, etf: 레버리지/인버스ETF변동성)")
+    parser.add_argument(
+        "--strategy",
+        choices=["auto", "a", "b", "c", "complex", "etf", "bull", "bear", "ma"],
+        default="auto",
+        help="매매 전략 (auto: 시장자동판별[기본], a: 하락장방어, b: 횡보장복합, c: 상승장추세)"
+    )
     parser.add_argument("--interval", type=int, default=10,
                         help="매매 체크 주기 (분)")
     parser.add_argument("--once", action="store_true",
@@ -608,7 +614,7 @@ def main():
     # ─── 투자 모드 확인 (모의/실전) ───────────────────────────
     if settings.TRADE_MODE != "paper":
         log.warning("[REAL] 실전투자 모드입니다. 승인을 진행합니다.")
-        approved = notifier.request_real_trading_approval(timeout_seconds=120)
+        approved = notifier.request_real_trading_approval(timeout_seconds=180)
         if not approved:
             log.info("[REAL] 사용자가 실전투자 실행을 취소했습니다.")
             notifier.notify_stop("실전투자 승인 거부 또는 시간 초과")
@@ -617,56 +623,69 @@ def main():
     else:
         log.info("[Paper] 모의투자 모드로 실행합니다.")
 
-    # 전략 및 감시 종목 선택
-    kosdaq_watch_list  = []
-    etf_leverage_list  = []
-    etf_inverse_list   = []
-    if args.strategy == "complex":
-        strategy = Kospi200ComplexStrategy()
-        watch_list = get_kis_kospi200_top150()
-        log.info("  KOSPI 200 종목 중 시총 상위 150위를 한국투자증권 API로 갱신하여 감시합니다.")
-        # 코스닥 에너지·반도체 종목 (총자산의 10% 한도)
-        kosdaq_watch_list = get_kosdaq150_energy_semi()
-        log.info(f"  코스닥 에너지·반도체 {len(kosdaq_watch_list)}종목 추가 감시 (투자한도: 총자산 10%)")
-    elif args.strategy == "volatility":
-        # ★ 기본 전략: 래리 윌리엄스 변동성 돌파 (LW-VBS v3)
-        strategy = VolatilityBreakoutStrategy(
-            k=0.5,                  # 변동성 계수 50%
-            stop_loss_pct=-2.5,     # 손절 -2.5%
-            profit_take_pct=5.0,    # 즉시 익절 +5%
-            range_ratio_min=0.8,    # 전일 변동폭 80% 이상
-            vol_ratio_min=1.5,      # 전일 거래량 1.5배 이상
-            max_entry_gap_pct=4.0,  # 목표가 시가 괴리 최대 4%
-            use_day_filter=True,    # 화·수 매수 / 목 청산
-        )
-        watch_list = WATCH_LIST_LW
-        log.info(f"  [LW-VBS] 래리 윌리엄스 변동성 돌파 전략 | 감시종목: {len(watch_list)}개")
-        log.info("  화·수요일 매수 → 목요일 강제 청산 | 손절 -2.5% | 즉시 익절 +5%")
-    elif args.strategy == "etf":
-        # ★ ETF 변동성 대응 전략: 나스닥 반도체 + 삼성전자 레버리지/인버스
-        strategy = EtfVolatilityStrategy(
-            stop_loss_pct=-3.0,    # 손절 -3% (레버리지 2배 실질 -6% 방어)
-            profit_take_pct=6.0,   # 즉시 익절 +6%
-            max_hold_days=3,       # 최대 3거래일 보유 (금요일 강제 청산 별도)
-        )
-        watch_list = []            # ETF 전략은 일반 종목 감시 없음
-        etf_leverage_list, etf_inverse_list = get_etf_watchlist(
-            use_nasdaq_semi=True,
-            use_samsung=True,
-            include_inverse=True,
-        )
-        log.info(
-            f"  [ETF] 변동성 대응 전략 | "
-            f"레버리지 {len(etf_leverage_list)}종목 + 인버스(헤지) {len(etf_inverse_list)}종목"
-        )
-        log.info(
-            f"  레버리지 한도: 현금 {ETF_LEV_CASH_RATIO*100:.0f}% | "
-            f"인버스 한도: 현금 {ETF_INV_CASH_RATIO*100:.0f}%"
-        )
-        log.info("  손절 -3% | 익절 +6% | 금요일 강제청산 | 레버리지+인버스 동시보유 금지")
-    else:
-        strategy = MovingAverageCrossStrategy(short_window=5, long_window=20)
-        watch_list = WATCH_LIST
+    # ─── 전략 & 감시종목 로더 ─────────────────────────────────────
+    current_mode_key = args.strategy
+
+    def load_strategy_mode(mode_key: str):
+        """
+        mode_key: "auto" / "a" / "b" / "c" / "volatility" / "complex" / "etf" / "bull" / "bear" / "ma"
+        Returns: (strategy, watch_list, kosdaq_watch_list, etf_leverage_list, etf_inverse_list, regime)
+        """
+        regime = detect_regime()
+        effective_key = mode_key
+
+        if mode_key == "auto":
+            if regime == MarketRegime.BEAR:
+                effective_key = "a"
+            elif regime == MarketRegime.BULL:
+                effective_key = "c"
+            else:
+                effective_key = "b"
+
+        if effective_key in ["a", "bear"]:
+            strat = DefensiveBearStrategy()
+            w_list = []
+            kosdaq_w = []
+            lev_list = []
+            inv_list = ["114800", "252670"]  # KODEX 인버스, KODEX 200선물인버스2X
+            log.info(f"  🔴 [하락장 전략] {strat.name} | 현금 보존 + 인버스 ETF 헤지")
+        elif effective_key in ["c", "bull"]:
+            strat = BullTrendStrategy()
+            w_list = get_kis_kospi200_top150()
+            kosdaq_w = get_kosdaq150_energy_semi()
+            lev_list = []
+            inv_list = []
+            log.info(f"  🟢 [상승장 전략] {strat.name} | KOSPI 200 {len(w_list)}종목 감시")
+        elif effective_key in ["b", "complex"]:
+            strat = Kospi200ComplexStrategy()
+            w_list = get_kis_kospi200_top150()
+            kosdaq_w = get_kosdaq150_energy_semi()
+            lev_list = []
+            inv_list = []
+            log.info(f"  🟡 [횡보장 전략] {strat.name} | KOSPI 200 {len(w_list)}종목 감시")
+        elif effective_key == "etf":
+            strat = EtfVolatilityStrategy(stop_loss_pct=-3.0, profit_take_pct=6.0, max_hold_days=3)
+            w_list = []
+            kosdaq_w = []
+            lev_list, inv_list = get_etf_watchlist(use_nasdaq_semi=True, use_samsung=True, include_inverse=True)
+            log.info(f"  [ETF] 변동성 대응 전략 | 레버리지 {len(lev_list)}개 + 인버스 {len(inv_list)}개")
+        else:
+            strat = MovingAverageCrossStrategy(short_window=5, long_window=20)
+            w_list = WATCH_LIST
+            kosdaq_w = []
+            lev_list = []
+            inv_list = []
+
+        return strat, w_list, kosdaq_w, lev_list, inv_list, regime
+
+    (
+        strategy,
+        watch_list,
+        kosdaq_watch_list,
+        etf_leverage_list,
+        etf_inverse_list,
+        current_regime,
+    ) = load_strategy_mode(current_mode_key)
 
     mode_label = "paper" if settings.is_paper else "real"
     log.info("=" * 50)
@@ -724,7 +743,9 @@ def main():
     # ─── 세션 정의 ────────────────────────────────────────────
     # (시작H, 시작M, 종료H, 종료M, 세션명)
     SESSIONS = [
+        (8,  0,  8, 50, "NXT 프리마켓"),
         (9,  0, 15, 30, "KRX 정규장"),
+        (15, 40, 20,  0, "NEX 애프터마켓"),
     ]
 
     def get_current_session(dt: datetime) -> Optional[str]:
@@ -835,10 +856,28 @@ def main():
                     else:
                         log.info("[USER CONTROL] 텔레그램 '1' 수신 (이미 가동 상태) → 즉시 응답")
                         notifier.notify_status(True, changed=False)   # 즉시 응답: 이미 가동
+                elif cmd in ["a", "b", "c", "auto"]:
+                    log.info(f"[USER CONTROL] 텔레그램 '{cmd}' 수신 → 전략 변경 진행")
+                    current_mode_key = cmd
+                    (
+                        new_strat,
+                        new_wlist,
+                        new_kosdaq,
+                        new_lev,
+                        new_inv,
+                        current_regime,
+                    ) = load_strategy_mode(current_mode_key)
+                    trader.strategy = new_strat
+                    trader.universe_watch_list = new_wlist
+                    trader.watch_list = new_wlist
+                    trader.kosdaq_watch_list = new_kosdaq
+                    trader.etf_leverage_list = new_lev
+                    trader.etf_inverse_list = new_inv
+                    notifier.notify_strategy_changed(new_strat.name, mode_label)
                 elif cmd == "2":  # 현재 가동 상태 조회
                     is_actually_running = (is_today_trading and bool(session) and not is_paused_by_user)
                     log.info(f"[USER CONTROL] 텔레그램 '2' 수신 → 즉시 상태 조회 응답 (가동={is_actually_running})")
-                    
+
                     try:
                         balance_info = get_balance()
                     except Exception as e:
@@ -851,6 +890,8 @@ def main():
                         session=session,
                         is_paused=is_paused_by_user,
                         balance=balance_info,
+                        strategy_name=trader.strategy.name,
+                        regime_label=get_regime_label(current_regime),
                     )
 
             now = datetime.now()

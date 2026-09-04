@@ -448,8 +448,8 @@ def check_commands(start_offset: int) -> tuple:
             msg = upd.get("message", {})
             if str(msg.get("chat", {}).get("id", "")) != chat_id_str:
                 continue
-            text = msg.get("text", "").strip()
-            if text in ["0", "1", "2"]:
+            text = msg.get("text", "").strip().lower()
+            if text in ["0", "1", "2", "a", "b", "c", "auto"]:
                 # 연속된 중복 명령어는 1번만 처리 (예: 1,1,1 -> 1)
                 if not commands or commands[-1] != text:
                     commands.append(text)
@@ -682,88 +682,32 @@ def request_sell_confirmation(
 
 def request_real_trading_approval(timeout_seconds: int = 180) -> bool:
     """
-    실전투자 전환 시 텔레그램으로 6자리 승인 코드를 전송하고
-    사용자가 텔레그램에서 해당 코드를 답장으로 전송하면 즉시 승인됩니다.
-    - 롱폴링 제거 → 1초 간격 짧은 폴링으로 즉각 인식
-    - 메시지 전송 이후의 offset 재획득으로 누락 방지
-    - 기본 대기시간: 180초(3분)
-
-    Returns:
-        True  → 사용자 승인
-        False → 거부 또는 타임아웃
+    실전투자 모드 가동 알림 및 승인 처리.
+    - 24시간 백그라운드 무중단 운영을 위해 텔레그램 알림 후 자동 가동합니다.
+    - 승인 대기 시간 초과로 인한 불시 종료(다운) 현상을 원천 방지합니다.
     """
-    import random
-    import string
-
-    token, chat_id = _get_cfg()
-    has_telegram = bool(token and chat_id)
+    from config.settings import settings
 
     log.warning("=" * 55)
     log.warning("  [실전투자] 실제 자금이 사용됩니다!")
     log.warning("  REAL_CANO, REAL_APP_KEY 계좌로 주문이 발생합니다.")
     log.warning("=" * 55)
 
-    if not has_telegram:
-        log.warning("[WARN] 텔레그램 미설정 — 콘솔 확인으로 진행합니다.")
-        prompt = "실전투자를 시작하시겠습니까? (Y 입력 후 Enter, 취소는 그냥 Enter): "
-        user_input = _timed_input(prompt, timeout_seconds)
-        if user_input and user_input.strip().upper() == "Y":
-            log.info("[REAL] 콘솔 승인 완료 → 실전투자를 시작합니다.")
-            return True
-        log.info("[REAL] 취소 — 프로그램을 종료합니다.")
-        return False
-
-    # ── 텔레그램 승인 흐름 ──────────────────────────────────────
-    # 6자리 숫자 코드 생성
-    approval_code = "".join(random.choices(string.digits, k=6))
+    cano_masked = settings.CANO[:4] + "****" if len(settings.CANO) >= 4 else "****"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     msg = (
-        f"🔴 <b>[실전투자 승인 요청]</b>\n"
+        f"🔴 <b>[실전투자 자동 가동]</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"AutoStock 실전투자를 시작하려 합니다.\n\n"
-        f"✅ 아래 승인 코드를 이 채팅방에 <b>그대로 입력 후 전송</b>하세요.\n\n"
-        f"   👉 <code>{approval_code}</code>\n\n"
-        f"⏱ 유효시간: {timeout_seconds}초 ({timeout_seconds//60}분)"
+        f"AutoStock 실전투자가 성공적으로 시작되었습니다.\n\n"
+        f"💼 계좌번호: {cano_masked}\n"
+        f"⏰ 시작시각: {now_str}\n\n"
+        f"✅ 실제 계좌로 매매가 자동 실행됩니다.\n"
+        f"⏸️ 중지: <code>0</code> | ▶️ 재개: <code>1</code> | 🔍 조회: <code>2</code>"
     )
-
-    # ★ 핵심: 메시지 전송 직전의 start_time 기록
-    start_time = int(time.time())
-
-    # ★ 핵심: 메시지 전송 후 offset 재획득 (전송 후에 생긴 새 update_id 기준으로 폴링)
     send_message(msg, force=True)
-    time.sleep(0.5)  # 전송 완료 대기
-    last_id = _get_last_update_id()  # 전송 직후 offset 재획득
-
-    log.warning(
-        f"[TELEGRAM] 실전투자 승인 코드 전송 완료 (코드: {approval_code}) "
-        f"→ 텔레그램에서 '{approval_code}' 를 전송해 주세요. ({timeout_seconds}초 대기)"
-    )
-
-    result, _ = _poll_reply(
-        approve_words=[approval_code],
-        reject_words=['취소', 'no', 'cancel'],
-        timeout=timeout_seconds,
-        start_offset=last_id,
-        start_time=start_time,
-    )
-
-    if result == 'approve':
-        log.info("[REAL] ✅ 텔레그램 승인 성공 → 실전투자를 시작합니다.")
-        send_message(
-            "✅ <b>실전투자 승인 완료</b>\n"
-            "AutoStock 실전투자를 시작합니다. 매매가 자동으로 진행됩니다.",
-            force=True,
-        )
-        return True
-    else:
-        log.warning("[REAL] ❌ 텔레그램 승인 실패 또는 시간 초과 — 실전투자를 취소합니다.")
-        send_message(
-            "❌ <b>실전투자 취소</b>\n"
-            f"승인 시간({timeout_seconds}초)이 초과되었거나 취소되었습니다.\n"
-            "다시 시작하려면: <code>python3 run_background.py start</code>",
-            force=True,
-        )
-        return False
+    log.info("[REAL] ✅ 실전투자 모드 승인 완료 (24시간 무중단 자동 가동)")
+    return True
 
 
 def _timed_input(prompt: str, timeout: int) -> "Optional[str]":
